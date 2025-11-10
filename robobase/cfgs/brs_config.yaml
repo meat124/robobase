@@ -14,12 +14,13 @@ lr_cosine_min: 0.000005  # 5e-6
 lr_layer_decay: 1.0
 wd: 0.1  # from wbvima.yaml
 bs: 256  # batch_size
-vbs: 256  # val_batch_size (same as bs by default)
+vbs: 256  # val_batch_size
 val_split_ratio: 0.1
-dataloader_num_workers: 4
+dataloader_num_workers: 16
 eval_interval: 10
 rollout_eval: false
 gradient_clip_val: 1.0
+max_epochs: 10000  # Maximum number of epochs (set to desired value, or 999999999 for infinite)
 
 # ------ logging ------
 use_wandb: true
@@ -27,43 +28,50 @@ wandb_project: "brs_policy"
 wandb_run_name: "${run_name}"
 
 # ------ common ------
-action_keys: ["mobile_base", "torso", "left_arm", "left_gripper", "right_arm", "right_gripper"]
+# BigYM native 16-dim actions mapped to BRS Policy 3-part autoregressive structure:
+# BigYM: [mobile_base(4) + left_arm(5) + right_arm(5) + grippers(2)] = 16
+# BRS structure: [mobile_base(3) + torso(1) + arms(12)] = 16
+# Direct mapping without padding:
+#   - mobile_base: BigYM[0:3] (3 dims)
+#   - torso: BigYM[3:4] (1 dim) 
+#   - arms: BigYM[4:16] (12 dims = left_arm(5) + right_arm(5) + grippers(2))
+action_dim: 16
+action_keys: ["mobile_base", "torso", "arms"]
 action_key_dims:
   mobile_base: 3
-  torso: 4
-  left_arm: 6
-  left_gripper: 1
-  right_arm: 6
-  right_gripper: 1
+  torso: 1
+  arms: 12
 
 # ====== Architecture specific (from arch/wbvima.yaml) ======
 num_latest_obs: 2
 action_prediction_horizon: 8
 
 # ------ Policy settings ------
-prop_dim: 21
+prop_dim: 16  # Changed from 21 to match actual BigYM data (3+1+5+1+5+1)
 prop_keys: ["odom/base_velocity", "qpos/torso", "qpos/left_arm", "qpos/left_gripper", "qpos/right_arm", "qpos/right_gripper"]
 use_modality_type_tokens: false
 prop_mlp_hidden_depth: 2
-prop_mlp_hidden_dim: 256
+prop_mlp_hidden_dim: 256  # Paper original setting
 pointnet_n_coordinates: 3
 pointnet_n_color: 3
 pointnet_hidden_depth: 2
-pointnet_hidden_dim: 256
+pointnet_hidden_dim: 256  # Paper original setting
 pcd_downsample_points: 512
 
 # ====== Transformer ======
-xf_n_embd: 256
-xf_n_layer: 2
-xf_n_head: 8
+# Paper's original hyperparameters from brs-algo
+# Model size: ~7.5M parameters (intentionally small for efficiency)
+xf_n_embd: 256      # Paper original
+xf_n_layer: 2       # Paper original (NOT a demo config - this is production)
+xf_n_head: 8        # Paper original
 xf_dropout_rate: 0.1
 xf_use_geglu: true
 
 # ====== Action Decoding ======
 learnable_action_readout_token: false
-action_dim: 21
+# action_dim defined above in common section (16 dims: 3+1+12)
 diffusion_step_embed_dim: 128
-unet_down_dims: [64, 128]
+unet_down_dims: [64, 128]  # Paper original
 unet_kernel_size: 5
 unet_n_groups: 8
 unet_cond_predict_scale: true
@@ -84,3 +92,12 @@ num_denoise_steps_per_inference: 16
 
 # ====== Module (DiffusionModule) ======
 loss_on_latest_obs_only: false
+
+# ====== PCD Dataset Settings ======
+# Use relative paths from project root or environment variables
+# Default paths can be overridden via command line arguments
+hdf5_path: "../data/demonstrations/0.9.0/SaucepanToHob.hdf5"  # Relative to robobase directory
+pcd_root: "../bigym/pcd_output_filtered"  # Relative to robobase directory
+cameras: ["head", "left_wrist", "right_wrist"]
+max_points_per_camera: 2048
+demo_ids: null  # null means auto-discover from pcd_root directory

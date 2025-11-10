@@ -1,0 +1,9 @@
+# @package _global_
+
+# BRS Policy method configuration
+# This tells Hydra to use BRSLightningMethod for training
+
+method:
+  _target_: robobase.method.brs_lightning.BRSLightningMethod
+  is_rl: false
+  config_path: ${hydra:runtime.cwd}/robobase/cfgs/brs_config.yaml

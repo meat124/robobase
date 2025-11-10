@@ -30,7 +30,10 @@ from brs_algo.learning.module import DiffusionModule
 from brs_algo.learning.data import ActionSeqChunkDataModule
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
+# Import PCD dataset classes
+from robobase.method.pcd_dataset import PCDBRSDataset, PCDDataModule, pcd_brs_collate_fn
 
+# base 3 torso 1 left arm 5 left gripper 1 right arm 5 right gripper 1
 class DummyBRSDataset(Dataset):
     """
     Dummy dataset for testing BRS training
@@ -65,10 +68,10 @@ class DummyBRSDataset(Dataset):
                 "base_velocity": np.random.randn(self.num_latest_obs, 3).astype(np.float32),
             },
             "qpos": {
-                "torso": np.random.randn(self.num_latest_obs, 4).astype(np.float32),
-                "left_arm": np.random.randn(self.num_latest_obs, 6).astype(np.float32),
+                "torso": np.random.randn(self.num_latest_obs, 1).astype(np.float32),
+                "left_arm": np.random.randn(self.num_latest_obs, 5).astype(np.float32),
                 "left_gripper": np.random.randn(self.num_latest_obs, 1).astype(np.float32),
-                "right_arm": np.random.randn(self.num_latest_obs, 6).astype(np.float32),
+                "right_arm": np.random.randn(self.num_latest_obs, 5).astype(np.float32),
                 "right_gripper": np.random.randn(self.num_latest_obs, 1).astype(np.float32),
             },
             "pointcloud": {
@@ -77,15 +80,12 @@ class DummyBRSDataset(Dataset):
             }
         }
         
-        # Generate dummy actions matching action_keys
+        # Generate dummy actions matching action_keys (21 dims total)
         # Actions have shape: (num_latest_obs, action_prediction_horizon, dim)
         action_chunks = {
             "mobile_base": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 3).astype(np.float32),
             "torso": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 4).astype(np.float32),
-            "left_arm": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 6).astype(np.float32),
-            "left_gripper": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 1).astype(np.float32),
-            "right_arm": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 6).astype(np.float32),
-            "right_gripper": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 1).astype(np.float32),
+            "arms": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 14).astype(np.float32),
         }
         
         # Padding mask: all ones (no padding)
@@ -116,10 +116,7 @@ def brs_collate_fn(batch):
     action_chunks = {
         "mobile_base": torch.from_numpy(np.stack([b["action_chunks"]["mobile_base"] for b in batch])),
         "torso": torch.from_numpy(np.stack([b["action_chunks"]["torso"] for b in batch])),
-        "left_arm": torch.from_numpy(np.stack([b["action_chunks"]["left_arm"] for b in batch])),
-        "left_gripper": torch.from_numpy(np.stack([b["action_chunks"]["left_gripper"] for b in batch])),
-        "right_arm": torch.from_numpy(np.stack([b["action_chunks"]["right_arm"] for b in batch])),
-        "right_gripper": torch.from_numpy(np.stack([b["action_chunks"]["right_gripper"] for b in batch])),
+        "arms": torch.from_numpy(np.stack([b["action_chunks"]["arms"] for b in batch])),
     }
     
     pad_mask = torch.from_numpy(np.stack([b["pad_mask"] for b in batch]))
@@ -226,10 +223,37 @@ class DummyDataModule(pl.LightningDataModule):
 # ============================================================================
 
 
+def expand_path(path_str: str) -> str:
+    """
+    Expand path string to absolute path
+    - Expands ~ to home directory
+    - Resolves relative paths to absolute paths
+    """
+    if path_str is None:
+        return None
+    
+    # Expand ~ to home directory
+    path = Path(path_str).expanduser()
+    
+    # If relative path, resolve to absolute
+    if not path.is_absolute():
+        # Resolve relative to current working directory
+        path = Path.cwd() / path
+    
+    return str(path.resolve())
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
-    """Load YAML config file"""
+    """Load YAML config file and expand paths"""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
+    
+    # Expand paths in config
+    if 'hdf5_path' in config and config['hdf5_path']:
+        config['hdf5_path'] = expand_path(config['hdf5_path'])
+    if 'pcd_root' in config and config['pcd_root']:
+        config['pcd_root'] = expand_path(config['pcd_root'])
+    
     return config
 
 
@@ -296,13 +320,14 @@ def create_module_from_config(config: Dict[str, Any]) -> DiffusionModule:
 
 
 
-def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = True):
+def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = True, use_pcd: bool = False):
     """
     Create DataModule from config
     
     Args:
         config: Config dict
-        use_dummy: If True, use DummyDataModule. If False, use ActionSeqChunkDataModule (needs real data)
+        use_dummy: If True, use DummyDataModule. If False, use real data
+        use_pcd: If True, use PCDDataModule with PCD files. Otherwise use ActionSeqChunkDataModule
     """
     if use_dummy:
         data_module = DummyDataModule(
@@ -311,6 +336,22 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             batch_size=config['bs'],
             prop_dim=config['prop_dim'],
             pcd_downsample_points=config['pcd_downsample_points'],
+            val_batch_size=config['vbs'],
+            val_split_ratio=config['val_split_ratio'],
+            dataloader_num_workers=config['dataloader_num_workers'],
+            seed=config['seed'] if config['seed'] > 0 else None,
+        )
+    elif use_pcd:
+        # Use PCD data module
+        data_module = PCDDataModule(
+            hdf5_path=config['hdf5_path'],
+            pcd_root=config['pcd_root'],
+            demo_ids=config.get('demo_ids', None),  # Auto-discover if not provided
+            cameras=config.get('cameras', ['head', 'left_wrist', 'right_wrist']),
+            num_latest_obs=config['num_latest_obs'],
+            action_prediction_horizon=config['action_prediction_horizon'],
+            max_points_per_camera=config.get('max_points_per_camera', 2048),
+            batch_size=config['bs'],
             val_batch_size=config['vbs'],
             val_split_ratio=config['val_split_ratio'],
             dataloader_num_workers=config['dataloader_num_workers'],
@@ -348,12 +389,13 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
 # Main Training Function
 # ============================================================================
 
-def train(config_path: str, **overrides):
+def train(config_path: str, use_pcd: bool = False, **overrides):
     """
     Main training function following brs-algo structure
     
     Args:
         config_path: Path to config YAML file
+        use_pcd: If True, use PCDDataModule instead of dummy data
         **overrides: Override config values
     """
     # Load config
@@ -374,6 +416,10 @@ def train(config_path: str, **overrides):
     print("="*80)
     print(f"Run name: {config['run_name']}")
     print(f"Config: {config_path}")
+    print(f"Data mode: {'PCD Dataset' if use_pcd else 'Dummy Dataset'}")
+    if use_pcd:
+        print(f"HDF5 path: {config.get('hdf5_path', 'NOT SET')}")
+        print(f"PCD root: {config.get('pcd_root', 'NOT SET')}")
     print(f"Batch size: {config['bs']} (val: {config['vbs']})")
     print(f"Learning rate: {config['lr']}")
     print(f"Weight decay: {config['wd']}")
@@ -392,7 +438,7 @@ def train(config_path: str, **overrides):
     # Create module and data module
     print("Creating module and data module...")
     module = create_module_from_config(config)
-    data_module = create_data_module_from_config(config)
+    data_module = create_data_module_from_config(config, use_dummy=not use_pcd, use_pcd=use_pcd)
     
     print(f"Policy parameters: {sum(p.numel() for p in module.policy.parameters()):,}")
     print()
@@ -421,7 +467,7 @@ def train(config_path: str, **overrides):
             dirpath=run_dir / "ckpt",
             save_on_train_epoch_end=True,
             filename="epoch{epoch}-train_loss{train/loss:.5f}",
-            save_top_k=100,
+            save_top_k=10,  # Save only top 10 checkpoints with lowest train loss
             save_last=True,
             monitor="train/loss",  # Changed from train/loss_epoch
             mode="min",
@@ -430,7 +476,7 @@ def train(config_path: str, **overrides):
         ModelCheckpoint(
             dirpath=run_dir / "ckpt",
             filename="epoch{epoch}-val_l1{val/l1:.5f}",
-            save_top_k=-1,
+            save_top_k=1,  # Save only the best validation checkpoint
             monitor="val/l1",
             mode="min",
             auto_insert_metric_name=False,
@@ -442,13 +488,15 @@ def train(config_path: str, **overrides):
         default_root_dir=run_dir,
         accelerator="gpu" if config['gpus'] > 0 and torch.cuda.is_available() else "cpu",
         devices=config['gpus'] if config['gpus'] > 0 and torch.cuda.is_available() else 1,
-        max_epochs=999999999,  # Run indefinitely
+        max_epochs=config.get('max_epochs', 999999999),  # Use config value or run indefinitely
         check_val_every_n_epoch=config['eval_interval'],
         gradient_clip_val=config['gradient_clip_val'],
         logger=loggers,
         callbacks=callbacks,
         enable_progress_bar=True,
         log_every_n_steps=10,
+        precision='16-mixed',  # Use mixed precision for faster training
+        profiler='simple',  # Enable profiler to identify bottlenecks
     )
     
     # Train
@@ -484,6 +532,7 @@ if __name__ == "__main__":
         default='../cfgs/brs_config.yaml',
         help='Path to config file'
     )
+    parser.add_argument('--use-pcd', action='store_true', help='Use PCD dataset instead of dummy data')
     parser.add_argument('--gpus', type=int, default=None, help='Number of GPUs')
     parser.add_argument('--bs', type=int, default=None, help='Batch size')
     parser.add_argument('--vbs', type=int, default=None, help='Validation batch size')
@@ -509,7 +558,10 @@ if __name__ == "__main__":
         overrides['use_wandb'] = False
     
     # Get config path
-    config_path = Path(__file__).parent / args.config
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        # If relative path, resolve from current working directory
+        config_path = Path.cwd() / config_path
     
     # Train
-    train(str(config_path), **overrides)
+    train(str(config_path), use_pcd=args.use_pcd, **overrides)

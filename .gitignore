@@ -37,3 +37,6 @@ eval_video/
 *.csv
 events.out.*
 .DS_Store
+
+runs/
+logs/
