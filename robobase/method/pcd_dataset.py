@@ -283,22 +283,27 @@ class PCDBRSDataset(Dataset):
         # Load proprioception for observation window
         obs_indices = range(start_frame, start_frame + self.num_latest_obs)
         
-        # Base velocity (if available)
-        if 'proprioception_floating_base' in demo_data['obs']:
-            base_velocity = demo_data['obs']['proprioception_floating_base'][obs_indices, :3]
-        else:
-            base_velocity = np.zeros((self.num_latest_obs, 3), dtype=np.float32)
-        
-        # Joint positions (proprioception)
+        # Joint positions (proprioception) - 16D total
+        # Total 60D = 30D qpos + 30D qvel
+        # qpos [0-29]: pelvis(4) + left_arm(5) + left_gripper(8) + right_arm(5) + right_gripper(8)
+        # qvel [30-59]: same structure as qpos
         proprioception = demo_data['obs']['proprioception']
-        prop_data = proprioception[obs_indices]
+        prop_data = proprioception[obs_indices]  # (num_latest_obs, 60)
         
-        # Split proprioception
-        torso = prop_data[:, 0:1]  # 1 dim
-        left_arm = prop_data[:, 1:6]  # 5 dims
-        left_gripper = prop_data[:, 6:7]  # 1 dim
-        right_arm = prop_data[:, 7:12]  # 5 dims
-        right_gripper = prop_data[:, 12:13]  # 1 dim
+        # Extract from qpos (0-29) - POSITION ONLY
+        torso = prop_data[:, 2:3]                  # [2]: pelvis_z (1D)
+        left_arm = prop_data[:, 4:9]               # [4-8]: left arm 5 joints (5D)
+        left_gripper = prop_data[:, 9:10]          # [9]: left gripper main joint (1D)
+        right_arm = prop_data[:, 17:22]            # [17-21]: right arm 5 joints (5D)
+        right_gripper = prop_data[:, 22:23]        # [22]: right gripper main joint (1D)
+        
+        # Mobile base velocity from qvel (30-59) - VELOCITY ONLY (3D)
+        mobile_base_vel = np.concatenate([
+            prop_data[:, 30:32],   # [30-31]: x_vel, y_vel
+            prop_data[:, 33:34],   # [33]: rz_vel (skip index 32 which is pelvis_z_vel)
+        ], axis=-1)  # (num_latest_obs, 3)
+        
+        # Total 16D: torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1) + mobile_base_vel(3)
         
         # Load actions for prediction horizon
         action_indices = range(start_frame, start_frame + self.action_prediction_horizon)
@@ -336,16 +341,17 @@ class PCDBRSDataset(Dataset):
             pcd_rgb_padded[t, :n] = rgb[:n]
         
         # Create observation dict
+        # 16D proprioception: torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1) + mobile_base_vel(3)
         obs = {
             "odom": {
-                "base_velocity": base_velocity.astype(np.float32),
+                "base_velocity": mobile_base_vel.astype(np.float32),  # (num_latest_obs, 3)
             },
             "qpos": {
-                "torso": torso.astype(np.float32),
-                "left_arm": left_arm.astype(np.float32),
-                "left_gripper": left_gripper.astype(np.float32),
-                "right_arm": right_arm.astype(np.float32),
-                "right_gripper": right_gripper.astype(np.float32),
+                "torso": torso.astype(np.float32),                    # (num_latest_obs, 1)
+                "left_arm": left_arm.astype(np.float32),              # (num_latest_obs, 5)
+                "left_gripper": left_gripper.astype(np.float32),      # (num_latest_obs, 1)
+                "right_arm": right_arm.astype(np.float32),            # (num_latest_obs, 5)
+                "right_gripper": right_gripper.astype(np.float32),    # (num_latest_obs, 1)
             },
             "pointcloud": {
                 "xyz": pcd_xyz_padded,

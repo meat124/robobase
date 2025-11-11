@@ -47,7 +47,7 @@ num_latest_obs: 2
 action_prediction_horizon: 8
 
 # ------ Policy settings ------
-prop_dim: 16  # Changed from 21 to match actual BigYM data (3+1+5+1+5+1)
+prop_dim: 16  # base_velocity(3) + torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1)
 prop_keys: ["odom/base_velocity", "qpos/torso", "qpos/left_arm", "qpos/left_gripper", "qpos/right_arm", "qpos/right_gripper"]
 use_modality_type_tokens: false
 prop_mlp_hidden_depth: 2
