@@ -289,14 +289,19 @@ class PCDBRSDataset(Dataset):
         # qvel [30-59]: same structure as qpos
         proprioception = demo_data['obs']['proprioception']
         prop_data = proprioception[obs_indices]  # (num_latest_obs, 60)
+        gripper = demo_data['obs']['proprioception_grippers'][obs_indices]
         
         # Extract from qpos (0-29) - POSITION ONLY
         torso = prop_data[:, 2:3]                  # [2]: pelvis_z (1D)
         left_arm = prop_data[:, 4:9]               # [4-8]: left arm 5 joints (5D)
-        left_gripper = prop_data[:, 9:10]          # [9]: left gripper main joint (1D)
         right_arm = prop_data[:, 17:22]            # [17-21]: right arm 5 joints (5D)
-        right_gripper = prop_data[:, 22:23]        # [22]: right gripper main joint (1D)
-        
+
+        # Extract gripper positions from separate gripper data
+        # Shape must be (num_latest_obs, 1) to match other components
+        left_gripper = gripper[:, 0:1]             # left gripper (1D) - keep dimension
+        right_gripper = gripper[:, 1:2]            # right gripper (1D) - keep dimension
+
+
         # Mobile base velocity from qvel (30-59) - VELOCITY ONLY (3D)
         mobile_base_vel = np.concatenate([
             prop_data[:, 30:32],   # [30-31]: x_vel, y_vel
