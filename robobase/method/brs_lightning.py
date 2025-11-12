@@ -80,12 +80,12 @@ class DummyBRSDataset(Dataset):
             }
         }
         
-        # Generate dummy actions matching action_keys (21 dims total)
+        # Generate dummy actions matching action_keys (16 dims total)
         # Actions have shape: (num_latest_obs, action_prediction_horizon, dim)
         action_chunks = {
             "mobile_base": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 3).astype(np.float32),
-            "torso": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 4).astype(np.float32),
-            "arms": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 14).astype(np.float32),
+            "torso": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 1).astype(np.float32),
+            "arms": np.random.randn(self.num_latest_obs, self.action_prediction_horizon, 12).astype(np.float32),
         }
         
         # Padding mask: all ones (no padding)
