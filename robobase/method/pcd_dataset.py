@@ -11,6 +11,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pytorch_lightning as pl
+import json
+import os
 
 class PCDBRSDataset(Dataset):
     """
@@ -40,6 +42,9 @@ class PCDBRSDataset(Dataset):
         action_prediction_horizon: int = 10,
         max_points_per_camera: int = 2048,
         subsample_points: bool = True,
+        action_stats_path: Optional[str] = None,
+        prop_stats_path: Optional[str] = None,
+        normalize: bool = True,
     ):
         """
         Args:
@@ -51,6 +56,9 @@ class PCDBRSDataset(Dataset):
             action_prediction_horizon: Number of future actions to predict
             max_points_per_camera: Maximum number of points per camera (for memory efficiency)
             subsample_points: Whether to randomly subsample points
+            action_stats_path: Path to action statistics JSON file
+            prop_stats_path: Path to proprioception statistics JSON file
+            normalize: Whether to normalize actions and proprioception to [-1, 1]
         """
         self.hdf5_path = Path(hdf5_path)
         self.pcd_root = Path(pcd_root)
@@ -60,6 +68,71 @@ class PCDBRSDataset(Dataset):
         self.action_prediction_horizon = action_prediction_horizon
         self.max_points_per_camera = max_points_per_camera
         self.subsample_points = subsample_points
+        self.normalize = normalize
+        
+        # Load normalization statistics
+        if self.normalize:
+            if action_stats_path is None:
+                action_stats_path = self.hdf5_path.parent / "action_stats.json"
+            if prop_stats_path is None:
+                prop_stats_path = self.hdf5_path.parent / "prop_stats.json"
+            
+            print(f"Loading normalization stats:")
+            print(f"  - Action stats: {action_stats_path}")
+            print(f"  - Prop stats: {prop_stats_path}")
+            
+            with open(action_stats_path, 'r') as f:
+                self.action_stats = json.load(f)
+            with open(prop_stats_path, 'r') as f:
+                self.prop_stats = json.load(f)
+            
+            # Convert to numpy arrays - extract from nested structure
+            # JSON format: {"mobile_base": {"min": [...], "max": [...]}, "torso": {...}, "arms": {...}}
+            action_min_list = []
+            action_max_list = []
+            
+            # Mobile base (3D)
+            action_min_list.extend(self.action_stats['mobile_base']['min'])
+            action_max_list.extend(self.action_stats['mobile_base']['max'])
+            
+            # Torso (1D) - scalar value
+            action_min_list.append(self.action_stats['torso']['min'])
+            action_max_list.append(self.action_stats['torso']['max'])
+            
+            # Arms (12D)
+            action_min_list.extend(self.action_stats['arms']['min'])
+            action_max_list.extend(self.action_stats['arms']['max'])
+            
+            self.action_min = np.array(action_min_list)
+            self.action_max = np.array(action_max_list)
+            
+            # Proprioception format: {"mobile_base_vel": {...}, "torso": {...}, ...}
+            prop_min_list = []
+            prop_max_list = []
+            
+            # Mobile base velocity (3D)
+            prop_min_list.extend(self.prop_stats['mobile_base_vel']['min'])
+            prop_max_list.extend(self.prop_stats['mobile_base_vel']['max'])
+            
+            # Torso (1D) - scalar value
+            prop_min_list.append(self.prop_stats['torso']['min'])
+            prop_max_list.append(self.prop_stats['torso']['max'])
+            
+            # Left arm (5D), Left gripper (1D), Right arm (5D), Right gripper (1D)
+            for key in ['left_arm', 'left_gripper', 'right_arm', 'right_gripper']:
+                val_min = self.prop_stats[key]['min']
+                val_max = self.prop_stats[key]['max']
+                if isinstance(val_min, list):
+                    prop_min_list.extend(val_min)
+                    prop_max_list.extend(val_max)
+                else:
+                    prop_min_list.append(val_min)
+                    prop_max_list.append(val_max)
+            
+            self.prop_min = np.array(prop_min_list)
+            self.prop_max = np.array(prop_max_list)
+        else:
+            print("Normalization disabled")
         
         # HDF5 file handle (will be opened per worker)
         self._hdf5_file = None
@@ -73,6 +146,8 @@ class PCDBRSDataset(Dataset):
         print(f"  - Cameras: {cameras}")
         print(f"  - Window size: {num_latest_obs}")
         print(f"  - Action horizon: {action_prediction_horizon}")
+        if self.normalize:
+            print(f"  - Normalization: ENABLED (to [-1, 1])")
     
     def _get_hdf5_file(self):
         """
@@ -131,6 +206,42 @@ class PCDBRSDataset(Dataset):
                     samples.append((demo_id, start_idx, num_frames))
         
         return samples
+    
+    def _normalize_to_range(self, value: np.ndarray, min_val: np.ndarray, max_val: np.ndarray) -> np.ndarray:
+        """
+        Normalize value to [-1, 1] range
+        
+        Args:
+            value: Input values (can be 1D or 2D)
+            min_val: Minimum values per dimension
+            max_val: Maximum values per dimension
+        
+        Returns:
+            Normalized values in [-1, 1]
+        """
+        # Avoid division by zero
+        range_val = max_val - min_val
+        range_val = np.where(range_val == 0, 1.0, range_val)
+        
+        # Normalize to [-1, 1]
+        normalized = 2.0 * (value - min_val) / range_val - 1.0
+        
+        # Clip to ensure [-1, 1] range (in case of outliers)
+        return np.clip(normalized, -1.0, 1.0)
+    
+    def _denormalize_from_range(self, value: np.ndarray, min_val: np.ndarray, max_val: np.ndarray) -> np.ndarray:
+        """
+        Denormalize from [-1, 1] back to original range
+        
+        Args:
+            value: Normalized values in [-1, 1]
+            min_val: Minimum values per dimension
+            max_val: Maximum values per dimension
+        
+        Returns:
+            Original scale values
+        """
+        return min_val + (value + 1.0) * (max_val - min_val) / 2.0
     
     def _load_pcd_frame(self, demo_id: str, camera: str, frame_idx: int) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -302,7 +413,8 @@ class PCDBRSDataset(Dataset):
         right_gripper = gripper[:, 1:2]            # right gripper (1D) - keep dimension
 
 
-        # Mobile base velocity from qvel (30-59) - VELOCITY ONLY (3D)
+        # Mobile base VELOCITY from qvel (30-59) - to match BRS convention
+        # BRS uses velocity for both observation and action
         mobile_base_vel = np.concatenate([
             prop_data[:, 30:32],   # [30-31]: x_vel, y_vel
             prop_data[:, 33:34],   # [33]: rz_vel (skip index 32 which is pelvis_z_vel)
@@ -310,13 +422,50 @@ class PCDBRSDataset(Dataset):
         
         # Total 16D: torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1) + mobile_base_vel(3)
         
+        # Concatenate proprioception for normalization
+        # Shape: (num_latest_obs, 16)
+        proprioception_concat = np.concatenate([
+            mobile_base_vel,    # (T, 3)
+            torso,              # (T, 1)
+            left_arm,           # (T, 5)
+            left_gripper,       # (T, 1)
+            right_arm,          # (T, 5)
+            right_gripper,      # (T, 1)
+        ], axis=-1)  # (num_latest_obs, 16)
+        
+        # Normalize proprioception if enabled
+        if self.normalize:
+            proprioception_concat = self._normalize_to_range(
+                proprioception_concat, 
+                self.prop_min, 
+                self.prop_max
+            )
+            # Split back after normalization
+            mobile_base_vel = proprioception_concat[:, 0:3]
+            torso = proprioception_concat[:, 3:4]
+            left_arm = proprioception_concat[:, 4:9]
+            left_gripper = proprioception_concat[:, 9:10]
+            right_arm = proprioception_concat[:, 10:15]
+            right_gripper = proprioception_concat[:, 15:16]
+        
         # Load actions for prediction horizon
         action_indices = range(start_frame, start_frame + self.action_prediction_horizon)
         actions = demo_data['actions'][action_indices]
         
-        mobile_base_actions = actions[:, 0:3].astype(np.float32)  # 3 dims
-        torso_actions = actions[:, 3:4].astype(np.float32)        # 1 dim
-        arms_actions = actions[:, 4:16].astype(np.float32)        # 12 dims
+        # Convert mobile base action from delta position to velocity (to match BRS convention)
+        # BigYM stores delta position, but BRS uses velocity
+        # velocity = delta_position / dt, where dt = 1/50 = 0.02s (50Hz control frequency)
+        dt = 0.02
+        actions_converted = actions.copy()
+        actions_converted[:, 0:3] = actions[:, 0:3] / dt  # Convert mobile base to velocity
+        
+        # Normalize actions if enabled (after conversion)
+        if self.normalize:
+            actions_converted = self._normalize_to_range(actions_converted, self.action_min, self.action_max)
+        
+        mobile_base_actions = actions_converted[:, 0:3].astype(np.float32)  # 3 dims (now velocity)
+        torso_actions = actions_converted[:, 3:4].astype(np.float32)        # 1 dim
+        arms_actions = actions_converted[:, 4:16].astype(np.float32)        # 12 dims
         
         action_chunks = {
             "mobile_base": mobile_base_actions,
@@ -447,6 +596,9 @@ class PCDDataModule(pl.LightningDataModule):
         val_split_ratio: float = 0.1,
         dataloader_num_workers: int = 4,
         seed: Optional[int] = None,
+        normalize: bool = True,
+        action_stats_path: Optional[str] = None,
+        prop_stats_path: Optional[str] = None,
     ):
         super().__init__()
         self.hdf5_path = hdf5_path
@@ -461,6 +613,9 @@ class PCDDataModule(pl.LightningDataModule):
         self.val_split_ratio = val_split_ratio
         self.dataloader_num_workers = dataloader_num_workers
         self.seed = seed
+        self.normalize = normalize
+        self.action_stats_path = action_stats_path
+        self.prop_stats_path = prop_stats_path
         
         # Auto-discover demo_ids if not provided
         if self.demo_ids is None:
@@ -497,6 +652,9 @@ class PCDDataModule(pl.LightningDataModule):
             action_prediction_horizon=self.action_prediction_horizon,
             max_points_per_camera=self.max_points_per_camera,
             subsample_points=True,
+            normalize=self.normalize,
+            action_stats_path=self.action_stats_path,
+            prop_stats_path=self.prop_stats_path,
         )
         
         self.val_dataset = PCDBRSDataset(
@@ -508,6 +666,9 @@ class PCDDataModule(pl.LightningDataModule):
             action_prediction_horizon=self.action_prediction_horizon,
             max_points_per_camera=self.max_points_per_camera,
             subsample_points=False,  # No random subsampling for validation
+            normalize=self.normalize,
+            action_stats_path=self.action_stats_path,
+            prop_stats_path=self.prop_stats_path,
         )
     
     def train_dataloader(self):
@@ -519,7 +680,7 @@ class PCDDataModule(pl.LightningDataModule):
             collate_fn=pcd_brs_collate_fn,
             persistent_workers=self.dataloader_num_workers > 0,
             pin_memory=True,
-            prefetch_factor=2 if self.dataloader_num_workers > 0 else None,  # Prefetch 2 batches per worker
+            prefetch_factor=4 if self.dataloader_num_workers > 0 else None,  # Prefetch 2 batches per worker
         )
     
     def val_dataloader(self):
@@ -531,5 +692,5 @@ class PCDDataModule(pl.LightningDataModule):
             collate_fn=pcd_brs_collate_fn,
             persistent_workers=self.dataloader_num_workers > 0,
             pin_memory=True,
-            prefetch_factor=2 if self.dataloader_num_workers > 0 else None,
+            prefetch_factor=4 if self.dataloader_num_workers > 0 else None,
         )

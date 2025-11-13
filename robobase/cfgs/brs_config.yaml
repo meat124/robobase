@@ -101,3 +101,8 @@ pcd_root: "../bigym/pcd_output_filtered"  # Relative to robobase directory
 cameras: ["head", "left_wrist", "right_wrist"]
 max_points_per_camera: 2048
 demo_ids: null  # null means auto-discover from pcd_root directory
+
+# ====== Normalization Settings ======
+normalize: true  # Enable normalization to [-1, 1] for actions and proprioception
+action_stats_path: "../data/demonstrations/0.9.0/action_stats.json"  # Path to action statistics
+prop_stats_path: "../data/demonstrations/0.9.0/prop_stats.json"  # Path to proprioception statistics

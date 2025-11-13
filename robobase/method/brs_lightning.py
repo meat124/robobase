@@ -356,6 +356,9 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             val_split_ratio=config['val_split_ratio'],
             dataloader_num_workers=config['dataloader_num_workers'],
             seed=config['seed'] if config['seed'] > 0 else None,
+            normalize=config.get('normalize', True),
+            action_stats_path=config.get('action_stats_path', None),
+            prop_stats_path=config.get('prop_stats_path', None),
         )
     else:
         # Use real data module from brs-algo
