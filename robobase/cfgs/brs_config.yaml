@@ -25,7 +25,14 @@ max_epochs: 10000  # Maximum number of epochs (set to desired value, or 99999999
 # ------ logging ------
 use_wandb: true
 wandb_project: "brs_policy"
-wandb_run_name: "${run_name}"
+wandb_run_name: "${run_name}"  # 기본값 (deprecated, wandb_name 사용 권장)
+wandb_name: "${run_name}"  # wandb 실행 이름 (CLI로 --wandb-name으로 override 가능)
+log_every_n_steps: 10  # wandb에 로깅하는 빈도 (step 단위)
+# wandb에 추가로 로깅할 정보들:
+# - learning rate (자동)
+# - gradient norm (자동)
+# - train/val loss (자동)
+# - system metrics (GPU/CPU 사용률 등)
 
 # ------ common ------
 # BigYM native 16-dim actions mapped to BRS Policy 3-part autoregressive structure:

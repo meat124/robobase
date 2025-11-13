@@ -454,13 +454,28 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     
     if config['use_wandb']:
         try:
+            # wandb_name 설정: config에 지정된 경우 사용, 없으면 wandb_run_name 사용
+            wandb_name = config.get('wandb_name', config.get('wandb_run_name', 'brs_training'))
+            
             wandb_logger = WandbLogger(
                 project=config['wandb_project'],
-                name=config['wandb_run_name'],
+                name=wandb_name,
                 save_dir=run_dir,
+                log_model=False,  # 체크포인트는 로깅하지 않음
+                config=config,  # 전체 config를 wandb에 로깅
+                tags=[config.get('task', 'brs_policy'), f"seed_{config['seed']}"],  # 태그 추가
+                notes=f"Training BRS policy with {config['num_latest_obs']} obs window, {config['action_prediction_horizon']} action horizon",
             )
             loggers.append(wandb_logger)
-            print(f"Wandb enabled: {config['wandb_project']}/{config['wandb_run_name']}")
+            
+            # 추가 메타데이터 로깅
+            wandb_logger.experiment.config.update({
+                "model_params": sum(p.numel() for p in module.policy.parameters()),
+                "trainable_params": sum(p.numel() for p in module.policy.parameters() if p.requires_grad),
+            })
+            
+            print(f"Wandb enabled: {config['wandb_project']}/{wandb_name}")
+            print(f"  - Full config and model architecture logged")
         except Exception as e:
             print(f"Warning: Could not initialize wandb: {e}")
     
@@ -486,6 +501,9 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
         ),
     ]
     
+    # Add LearningRateMonitor callback for better logging
+    callbacks.append(LearningRateMonitor(logging_interval='step'))
+    
     # Create trainer
     trainer = pl.Trainer(
         default_root_dir=run_dir,
@@ -497,7 +515,7 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
         logger=loggers,
         callbacks=callbacks,
         enable_progress_bar=True,
-        log_every_n_steps=10,
+        log_every_n_steps=config.get('log_every_n_steps', 10),  # 설정 가능하게 변경
         precision='16-mixed',  # Use mixed precision for faster training
         profiler='simple',  # Enable profiler to identify bottlenecks
     )
@@ -542,6 +560,7 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=None, help='Learning rate')
     parser.add_argument('--seed', type=int, default=None, help='Random seed')
     parser.add_argument('--no-wandb', action='store_true', help='Disable wandb')
+    parser.add_argument('--wandb-name', type=str, default=None, help='Wandb run name (overrides config)')
     
     args = parser.parse_args()
     
@@ -559,6 +578,8 @@ if __name__ == "__main__":
         overrides['seed'] = args.seed
     if args.no_wandb:
         overrides['use_wandb'] = False
+    if args.wandb_name is not None:
+        overrides['wandb_name'] = args.wandb_name
     
     # Get config path
     config_path = Path(args.config)
