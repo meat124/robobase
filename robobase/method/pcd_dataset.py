@@ -680,7 +680,7 @@ class PCDDataModule(pl.LightningDataModule):
             collate_fn=pcd_brs_collate_fn,
             persistent_workers=self.dataloader_num_workers > 0,
             pin_memory=True,
-            prefetch_factor=4 if self.dataloader_num_workers > 0 else None,  # Prefetch 2 batches per worker
+            prefetch_factor=2 if self.dataloader_num_workers > 0 else None,  # Prefetch 2 batches per worker
         )
     
     def val_dataloader(self):
@@ -692,5 +692,5 @@ class PCDDataModule(pl.LightningDataModule):
             collate_fn=pcd_brs_collate_fn,
             persistent_workers=self.dataloader_num_workers > 0,
             pin_memory=True,
-            prefetch_factor=4 if self.dataloader_num_workers > 0 else None,
+            prefetch_factor=2 if self.dataloader_num_workers > 0 else None,
         )
