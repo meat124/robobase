@@ -31,14 +31,12 @@ def compute_action_stats(hdf5_path: str, output_json: str = None):
     for demo_id in demo_ids:
         actions = f['data'][demo_id]['actions'][:]
         
-        # Action structure: [X, Y, Z, RZ, left_arm(5), right_arm(5), grippers(2)]
-        # Convert mobile base (X, Y, RZ) and torso (Z) from delta position to velocity
-        actions_converted = actions.copy()
-        actions_converted[:, 0:2] = actions[:, 0:2] / dt   # Mobile base X, Y
-        actions_converted[:, 2:3] = actions[:, 2:3] / dt   # Torso Z
-        actions_converted[:, 3:4] = actions[:, 3:4] / dt   # Mobile base RZ
+        # NOTE: Actions are DELTA POSITION (not velocity)
+        # BigYM uses JointPositionActionMode with delta control
+        # No conversion needed - use delta directly for statistics
+        # Typical delta ranges: mobile_base ~0.01m, torso ~0.01m, arms ~0.5rad
         
-        all_actions.append(actions_converted)
+        all_actions.append(actions)  # Use delta directly
         print(f"  {demo_id}: {actions.shape[0]} frames")
     
     # Concatenate all actions
@@ -76,17 +74,17 @@ def compute_action_stats(hdf5_path: str, output_json: str = None):
     
     # Print statistics
     print("\n" + "="*80)
-    print("ACTION STATISTICS (Mobile base and torso converted to VELOCITY)")
+    print("ACTION STATISTICS (DELTA POSITION)")
     print("="*80)
     
-    print("\nMobile Base (X, Y, RZ) [VELOCITY m/s or rad/s]:")
+    print("\nMobile Base (X, Y, RZ) [DELTA POSITION m or rad]:")
     for i, (name) in enumerate(['x', 'y', 'rz']):
         print(f"  {name}: min={stats['mobile_base']['min'][i]:8.5f}, "
               f"max={stats['mobile_base']['max'][i]:8.5f}, "
               f"mean={stats['mobile_base']['mean'][i]:8.5f}, "
               f"std={stats['mobile_base']['std'][i]:8.5f}")
     
-    print("\nTorso (Z - pelvis_z) [VELOCITY m/s]:")
+    print("\nTorso (Z - pelvis_z) [DELTA POSITION m]:")
     print(f"  min={stats['torso']['min']:8.5f}, "
           f"max={stats['torso']['max']:8.5f}, "
           f"mean={stats['torso']['mean']:8.5f}, "
@@ -112,7 +110,16 @@ def compute_action_stats(hdf5_path: str, output_json: str = None):
 
 
 if __name__ == "__main__":
-    hdf5_path = "../data/demonstrations/0.9.0/SaucepanToHob.hdf5"
-    output_json = "../data/demonstrations/0.9.0/action_stats.json"
+    import argparse
     
-    stats = compute_action_stats(hdf5_path, output_json)
+    parser = argparse.ArgumentParser(description="Compute action statistics")
+    parser.add_argument("--input", type=str, 
+                       default="../data/demonstrations/0.9.0/SaucepanToHob_successful.hdf5",
+                       help="Input HDF5 file")
+    parser.add_argument("--output", type=str, 
+                       default="../data/demonstrations/0.9.0/action_stats.json",
+                       help="Output JSON file")
+    
+    args = parser.parse_args()
+    
+    stats = compute_action_stats(args.input, args.output)

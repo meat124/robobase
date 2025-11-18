@@ -439,9 +439,8 @@ class PCDBRSDataset(Dataset):
         action_indices = range(start_frame, start_frame + self.action_prediction_horizon)
         actions = demo_data['actions'][action_indices].copy()
         
-        # Convert delta to velocity for mobile_base and torso
-        dt = 0.02
-        actions[:, :4] /= dt  # Mobile base X, Y, Torso Z, Mobile base RZ
+        # NOTE: HDF5 actions are already in VELOCITY (converted in compute_action_stats.py)
+        # No need for delta-to-velocity conversion here!
         
         if self.normalize:
             actions = self._normalize_to_range(actions, self.action_min, self.action_max)
@@ -458,6 +457,14 @@ class PCDBRSDataset(Dataset):
         
         for t, frame_idx in enumerate(obs_indices):
             xyz, rgb = self._load_multi_camera_pcd(demo_id, frame_idx)
+            
+            # Normalize PCD data
+            if self.normalize:
+                # Normalize XYZ to [-1, 1]
+                xyz = self._normalize_to_range(xyz, self.pcd_xyz_min, self.pcd_xyz_max)
+                # Normalize RGB from [0, 255] to [-1, 1]
+                rgb = (rgb / 127.5) - 1.0
+            
             n = min(len(xyz), max_points_fixed)
             pcd_xyz_padded[t, :n] = xyz[:n]
             pcd_rgb_padded[t, :n] = rgb[:n]

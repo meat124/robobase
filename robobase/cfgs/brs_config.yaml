@@ -103,7 +103,7 @@ loss_on_latest_obs_only: false
 # ====== PCD Dataset Settings ======
 # Use relative paths from project root or environment variables
 # Default paths can be overridden via command line arguments
-hdf5_path: "../data/demonstrations/0.9.0/SaucepanToHob.hdf5"  # Relative to robobase directory
+hdf5_path: "../data/demonstrations/0.9.0/SaucepanToHob_successful.hdf5"  # Filtered to successful demos only
 pcd_root: "../bigym/pcd_output_filtered"  # Relative to robobase directory
 cameras: ["head", "left_wrist", "right_wrist"]
 max_points_per_camera: 2048

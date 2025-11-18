@@ -154,7 +154,16 @@ def compute_prop_stats(hdf5_path: str, output_json: str = None):
 
 
 if __name__ == "__main__":
-    hdf5_path = "../data/demonstrations/0.9.0/SaucepanToHob.hdf5"
-    output_json = "../data/demonstrations/0.9.0/prop_stats.json"
+    import argparse
     
-    stats = compute_prop_stats(hdf5_path, output_json)
+    parser = argparse.ArgumentParser(description="Compute proprioception statistics")
+    parser.add_argument("--input", type=str, 
+                       default="../data/demonstrations/0.9.0/SaucepanToHob_successful.hdf5",
+                       help="Input HDF5 file")
+    parser.add_argument("--output", type=str, 
+                       default="../data/demonstrations/0.9.0/prop_stats.json",
+                       help="Output JSON file")
+    
+    args = parser.parse_args()
+    
+    stats = compute_prop_stats(args.input, args.output)

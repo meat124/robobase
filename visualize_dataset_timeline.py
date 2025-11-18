@@ -8,7 +8,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-hdf5_path = '../data/demonstrations/0.9.0/SaucepanToHob.hdf5'
+hdf5_path = '../data/demonstrations/0.9.0/SaucepanToHob_successful.hdf5'
 
 print("=" * 80)
 print("DATASET TIMELINE VISUALIZATION")
