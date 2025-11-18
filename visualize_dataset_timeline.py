@@ -37,92 +37,96 @@ with h5py.File(hdf5_path, 'r') as f:
     # ========================================================================
     print("\n🎨 Plotting Mobile Base...")
     
-    # Plot 1: Mobile Base Position (accumulated)
+    # Plot 1: Mobile Base Position (accumulated) - X, Y
     ax1 = plt.subplot(8, 2, 1)
     ax1.plot(timesteps, floating_base_actions[:n_frames, 0], label='X position', linewidth=2)
     ax1.plot(timesteps, floating_base_actions[:n_frames, 1], label='Y position', linewidth=2)
-    ax1.set_title('Mobile Base - Accumulated Position (Observation)', fontsize=12, fontweight='bold')
+    ax1.set_title('Mobile Base XY - Accumulated Position (Observation)', fontsize=12, fontweight='bold')
     ax1.set_xlabel('Timestep')
-    ax1.set_ylabel('Position')
+    ax1.set_ylabel('Position (m)')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Plot 2: Mobile Base Actions (delta)
+    # Plot 2: Mobile Base Actions (delta) - X, Y
     ax2 = plt.subplot(8, 2, 2)
     ax2.plot(timesteps, actions[:n_frames, 0], label='X delta', linewidth=2)
     ax2.plot(timesteps, actions[:n_frames, 1], label='Y delta', linewidth=2)
-    ax2.set_title('Mobile Base - Delta Actions', fontsize=12, fontweight='bold')
+    ax2.set_title('Mobile Base XY - Delta Actions', fontsize=12, fontweight='bold')
     ax2.set_xlabel('Timestep')
-    ax2.set_ylabel('Delta Position')
+    ax2.set_ylabel('Delta Position (m)')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
-    # Plot 3: Mobile Base - Verify Cumsum
+    # Plot 3: Mobile Base RZ - Accumulated Position
     ax3 = plt.subplot(8, 2, 3)
-    cumsum_actions = np.cumsum(actions[:n_frames, 0:2], axis=0)
-    ax3.plot(timesteps, floating_base_actions[:n_frames, 0], label='Obs X', linewidth=2, alpha=0.7)
-    ax3.plot(timesteps, cumsum_actions[:, 0], label='Cumsum Action X', linewidth=2, linestyle='--', alpha=0.7)
-    ax3.set_title('Mobile Base X - Verification (Obs vs Cumsum)', fontsize=12, fontweight='bold')
+    ax3.plot(timesteps, floating_base_actions[:n_frames, 3], label='RZ obs (accumulated)', linewidth=2)
+    cumsum_rz = np.cumsum(actions[:n_frames, 3])
+    ax3.plot(timesteps, cumsum_rz, label='Cumsum RZ action', linewidth=2, linestyle='--', alpha=0.7)
+    ax3.set_title('Mobile Base RZ - Accumulated vs Cumsum', fontsize=12, fontweight='bold')
     ax3.set_xlabel('Timestep')
-    ax3.set_ylabel('Position')
+    ax3.set_ylabel('Angle (rad)')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    # Plot 4: Mobile Base Yaw
+    # Plot 4: Mobile Base - Verify Cumsum for X
     ax4 = plt.subplot(8, 2, 4)
-    ax4.plot(timesteps, floating_base_actions[:n_frames, 2], label='Yaw obs', linewidth=2)
-    cumsum_yaw = np.cumsum(actions[:n_frames, 2])
-    ax4.plot(timesteps, cumsum_yaw, label='Cumsum yaw action', linewidth=2, linestyle='--', alpha=0.7)
-    ax4.set_title('Mobile Base - Yaw', fontsize=12, fontweight='bold')
+    cumsum_x = np.cumsum(actions[:n_frames, 0])
+    ax4.plot(timesteps, floating_base_actions[:n_frames, 0], label='Obs X', linewidth=2, alpha=0.7)
+    ax4.plot(timesteps, cumsum_x, label='Cumsum Action X', linewidth=2, linestyle='--', alpha=0.7)
+    corr_x = np.corrcoef(floating_base_actions[:n_frames, 0], cumsum_x)[0, 1]
+    ax4.set_title(f'Mobile Base X - Verification (corr={corr_x:.4f})', fontsize=12, fontweight='bold')
     ax4.set_xlabel('Timestep')
-    ax4.set_ylabel('Angle (rad)')
+    ax4.set_ylabel('Position (m)')
     ax4.legend()
     ax4.grid(True, alpha=0.3)
     
     # ========================================================================
-    # 2. TORSO
+    # 2. TORSO (Z - pelvis_z)
     # ========================================================================
-    print("🎨 Plotting Torso...")
+    print("🎨 Plotting Torso (pelvis_z)...")
     
-    torso_qpos = prop[:n_frames, 27]
-    torso_actions = actions[:n_frames, 3]
+    torso_obs = floating_base_actions[:n_frames, 2]  # Z from floating_base_actions
+    torso_actions = actions[:n_frames, 2]  # Action index 2 is Z
     
-    # Plot 5: Torso Position
+    # Plot 5: Torso Position (accumulated)
     ax5 = plt.subplot(8, 2, 5)
-    ax5.plot(timesteps, torso_qpos, label='qpos (observation)', linewidth=2, color='blue')
-    ax5.set_title('Torso - Position (Observation)', fontsize=12, fontweight='bold')
+    ax5.plot(timesteps, torso_obs, label='Z obs (accumulated)', linewidth=2, color='blue')
+    cumsum_z = np.cumsum(torso_actions)
+    ax5.plot(timesteps, cumsum_z, label='Cumsum Z action', linewidth=2, linestyle='--', color='red', alpha=0.7)
+    corr_z = np.corrcoef(torso_obs, cumsum_z)[0, 1]
+    ax5.set_title(f'Torso (pelvis_z) - Accumulated (corr={corr_z:.4f})', fontsize=12, fontweight='bold')
     ax5.set_xlabel('Timestep')
-    ax5.set_ylabel('Position')
+    ax5.set_ylabel('Position (m)')
     ax5.legend()
     ax5.grid(True, alpha=0.3)
     
-    # Plot 6: Torso Actions
+    # Plot 6: Torso Actions (delta)
     ax6 = plt.subplot(8, 2, 6)
-    ax6.plot(timesteps, torso_actions, label='action (delta)', linewidth=2, color='red')
-    ax6.set_title('Torso - Action (Delta)', fontsize=12, fontweight='bold')
+    ax6.plot(timesteps, torso_actions, label='Z action (delta)', linewidth=2, color='red')
+    ax6.set_title('Torso (pelvis_z) - Delta Action', fontsize=12, fontweight='bold')
     ax6.set_xlabel('Timestep')
-    ax6.set_ylabel('Delta Position')
+    ax6.set_ylabel('Delta Position (m)')
     ax6.legend()
     ax6.grid(True, alpha=0.3)
     
-    # Plot 7: Torso - Verify Delta
+    # Plot 7: Torso - Verify Delta relationship
     ax7 = plt.subplot(8, 2, 7)
-    ax7.plot(timesteps[1:], torso_qpos[1:], label='Actual qpos[t]', linewidth=2, alpha=0.7)
-    predicted_qpos = torso_qpos[:-1] + torso_actions[:-1]
-    ax7.plot(timesteps[1:], predicted_qpos, label='qpos[t-1] + action[t-1]', linewidth=2, linestyle='--', alpha=0.7)
+    ax7.plot(timesteps[1:], torso_obs[1:], label='Obs[t]', linewidth=2, alpha=0.7)
+    predicted_obs = torso_obs[:-1] + torso_actions[:-1]
+    ax7.plot(timesteps[1:], predicted_obs, label='Obs[t-1] + Action[t-1]', linewidth=2, linestyle='--', alpha=0.7)
     ax7.set_title('Torso - Delta Verification', fontsize=12, fontweight='bold')
     ax7.set_xlabel('Timestep')
-    ax7.set_ylabel('Position')
+    ax7.set_ylabel('Position (m)')
     ax7.legend()
     ax7.grid(True, alpha=0.3)
     
     # Plot 8: Torso - Prediction Error
     ax8 = plt.subplot(8, 2, 8)
-    error = np.abs(torso_qpos[1:] - predicted_qpos)
+    error = np.abs(torso_obs[1:] - predicted_obs)
     ax8.plot(timesteps[1:], error, linewidth=2, color='red')
     ax8.set_title(f'Torso - Prediction Error (mean={error.mean():.6f})', fontsize=12, fontweight='bold')
     ax8.set_xlabel('Timestep')
-    ax8.set_ylabel('Absolute Error')
+    ax8.set_ylabel('Absolute Error (m)')
     ax8.grid(True, alpha=0.3)
     
     # ========================================================================
@@ -251,19 +255,30 @@ with h5py.File(hdf5_path, 'r') as f:
     floating_base_actions = demo['obs']['proprioception_floating_base_actions'][:]
     gripper_obs = demo['obs']['proprioception_grippers'][:]
     
-    print("\n✅ Mobile Base:")
+    print("\n✅ Mobile Base (X, Y, RZ):")
     cumsum_x = np.cumsum(actions[:, 0])
+    cumsum_y = np.cumsum(actions[:, 1])
+    cumsum_rz = np.cumsum(actions[:, 3])  # RZ is at index 3
     corr_x = np.corrcoef(floating_base_actions[:, 0], cumsum_x)[0, 1]
-    print(f"   X: obs vs cumsum(action) correlation = {corr_x:.6f}")
-    if corr_x > 0.99:
-        print(f"   ✅ PERFECT - Observation is accumulated actions")
+    corr_y = np.corrcoef(floating_base_actions[:, 1], cumsum_y)[0, 1]
+    corr_rz = np.corrcoef(floating_base_actions[:, 3], cumsum_rz)[0, 1]
+    print(f"   X:  obs vs cumsum(action) correlation = {corr_x:.6f}")
+    print(f"   Y:  obs vs cumsum(action) correlation = {corr_y:.6f}")
+    print(f"   RZ: obs vs cumsum(action) correlation = {corr_rz:.6f}")
+    if corr_x > 0.99 and corr_y > 0.99 and corr_rz > 0.99:
+        print(f"   ✅ PERFECT - Observations are accumulated actions")
     
-    print("\n✅ Torso:")
-    torso_qpos = prop[:, 27]
-    torso_actions = actions[:, 3]
-    predicted = torso_qpos[:-1] + torso_actions[:-1]
-    error = np.abs(torso_qpos[1:] - predicted).mean()
+    print("\n✅ Torso (Z - pelvis_z):")
+    torso_obs = floating_base_actions[:, 2]  # Z is at index 2
+    torso_actions = actions[:, 2]  # Action index 2
+    cumsum_z = np.cumsum(torso_actions)
+    corr_z = np.corrcoef(torso_obs, cumsum_z)[0, 1]
+    predicted = torso_obs[:-1] + torso_actions[:-1]
+    error = np.abs(torso_obs[1:] - predicted).mean()
+    print(f"   Obs vs cumsum(action) correlation = {corr_z:.6f}")
     print(f"   Delta prediction error = {error:.6f}")
+    if corr_z > 0.99:
+        print(f"   ✅ PERFECT - Observation is accumulated actions")
     if error < 0.01:
         print(f"   ✅ GOOD - Consistent with delta mode")
     

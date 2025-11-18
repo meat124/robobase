@@ -42,6 +42,8 @@ def compute_prop_stats(hdf5_path: str, output_json: str = None):
     # CRITICAL FIX: Use floating_base_actions instead of qvel
     # ====================================================================
     # Load floating base accumulated actions
+    # floating_base_actions shape: (num_frames, 4) - X, Y, Z, RZ
+    # We split this into mobile_base (X, Y, RZ) and torso (Z)
     all_floating_base = []
     for demo_id in demo_ids:
         floating_base = f['data'][demo_id]['obs']['proprioception_floating_base_actions'][:]
@@ -49,19 +51,25 @@ def compute_prop_stats(hdf5_path: str, output_json: str = None):
     all_floating_base = np.concatenate(all_floating_base, axis=0)
     print(f"Total floating_base_actions: {all_floating_base.shape}")
     
+    # Extract mobile_base (X, Y, RZ) and torso (Z) from floating_base_actions
+    mobile_base_xy = all_floating_base[:, 0:2]  # X, Y
+    mobile_base_rz = all_floating_base[:, 3:4]  # RZ
+    mobile_base_combined = np.concatenate([mobile_base_xy, mobile_base_rz], axis=1)  # (N, 3)
+    torso_z = all_floating_base[:, 2:3]  # Z (pelvis_z)
+    
     # Compute statistics for each component (matching dataset structure)
     stats = {
-        "mobile_base_vel": {  # NOW: floating_base_actions[:, 0:3] (accumulated position)
-            "min": [float(all_floating_base[:, 0].min()), float(all_floating_base[:, 1].min()), float(all_floating_base[:, 2].min())],
-            "max": [float(all_floating_base[:, 0].max()), float(all_floating_base[:, 1].max()), float(all_floating_base[:, 2].max())],
-            "mean": [float(all_floating_base[:, 0].mean()), float(all_floating_base[:, 1].mean()), float(all_floating_base[:, 2].mean())],
-            "std": [float(all_floating_base[:, 0].std()), float(all_floating_base[:, 1].std()), float(all_floating_base[:, 2].std())],
+        "mobile_base_vel": {  # floating_base_actions X, Y, RZ (accumulated position)
+            "min": mobile_base_combined.min(axis=0).tolist(),
+            "max": mobile_base_combined.max(axis=0).tolist(),
+            "mean": mobile_base_combined.mean(axis=0).tolist(),
+            "std": mobile_base_combined.std(axis=0).tolist(),
         },
-        "torso": {  # qpos[27]
-            "min": float(all_prop[:, 27].min()),
-            "max": float(all_prop[:, 27].max()),
-            "mean": float(all_prop[:, 27].mean()),
-            "std": float(all_prop[:, 27].std()),
+        "torso": {  # floating_base_actions Z (pelvis_z accumulated position)
+            "min": float(torso_z.min()),
+            "max": float(torso_z.max()),
+            "mean": float(torso_z.mean()),
+            "std": float(torso_z.std()),
         },
         "left_arm": {  # qpos[0:4, 12] - non-consecutive!
             "min": np.concatenate([all_prop[:, 0:4], all_prop[:, 12:13]], axis=1).min(axis=0).tolist(),
@@ -146,7 +154,7 @@ def compute_prop_stats(hdf5_path: str, output_json: str = None):
 
 
 if __name__ == "__main__":
-    hdf5_path = "/scratch2/meat124/bigym_ws/data/demonstrations/0.9.0/SaucepanToHob.hdf5"
-    output_json = "/scratch2/meat124/bigym_ws/data/demonstrations/0.9.0/prop_stats.json"
+    hdf5_path = "../data/demonstrations/0.9.0/SaucepanToHob.hdf5"
+    output_json = "../data/demonstrations/0.9.0/prop_stats.json"
     
     stats = compute_prop_stats(hdf5_path, output_json)

@@ -318,8 +318,6 @@ class PCDBRSDataset(Dataset):
         rgb_combined = np.concatenate(all_rgb, axis=0)
         
         return xyz_combined, rgb_combined
-        
-        return samples
     
     def _load_pcd_frame_from_hdf5(self, demo_group, camera: str, frame_idx: int) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -402,182 +400,90 @@ class PCDBRSDataset(Dataset):
     def __getitem__(self, idx):
         demo_id, start_frame, num_frames = self.samples[idx]
         
-        # Use persistent HDF5 file handle (CRITICAL FOR SPEED!)
         f = self._get_hdf5_file()
         demo_data = f['data'][demo_id]
-        
-        # Load proprioception for observation window
         obs_indices = range(start_frame, start_frame + self.num_latest_obs)
         
-        # Joint positions (proprioception) - 16D total
-        # Total 60D = 30D qpos + 30D qvel
-        # qpos [0-29]: Structure discovered through correlation analysis:
-        #   [0-4]: left_arm (5 joints) - correlation 0.997 with actions
-        #   [5-12]: left_gripper related (8D)
-        #   [13-17]: right_arm (5 joints) - correlation 0.999 with actions
-        #   [18-25]: right_gripper related (8D)
-        #   [2]: torso (pelvis_z)
-        # qvel [30-59]: same structure as qpos
-        proprioception = demo_data['obs']['proprioception']
-        prop_data = proprioception[obs_indices]  # (num_latest_obs, 60)
+        # Extract proprioception components
+        prop_data = demo_data['obs']['proprioception'][obs_indices]
         gripper = demo_data['obs']['proprioception_grippers'][obs_indices]
+        floating_base = demo_data['obs']['proprioception_floating_base_actions'][obs_indices]
         
-        # Extract from qpos (0-29) - POSITION ONLY
-        # CRITICAL FIX: Corrected indices based on exhaustive correlation analysis
-        # Arms have non-consecutive indices - joint 4 is stored separately
-        torso = prop_data[:, 27:28]                # [27]: torso (1D)
+        # Build proprioception observation (16D)
+        mobile_base_vel = np.concatenate([floating_base[:, 0:2], floating_base[:, 3:4]], axis=-1)  # X, Y, RZ
+        torso = floating_base[:, 2:3]  # Z (pelvis_z)
+        left_arm = np.concatenate([prop_data[:, 0:4], prop_data[:, 12:13]], axis=-1)
+        left_gripper = gripper[:, 0:1]
+        right_arm = np.concatenate([prop_data[:, 13:17], prop_data[:, 25:26]], axis=-1)
+        right_gripper = gripper[:, 1:2]
         
-        # Left arm: joints 0-3 are consecutive, joint 4 is at index 12
-        left_arm = np.concatenate([
-            prop_data[:, 0:4],      # joints 0-3: prop[0:4]
-            prop_data[:, 12:13]     # joint 4: prop[12]
-        ], axis=-1)  # (num_latest_obs, 5)
-        
-        # Right arm: joints 0-3 are consecutive, joint 4 is at index 25
-        right_arm = np.concatenate([
-            prop_data[:, 13:17],    # joints 0-3: prop[13:17]
-            prop_data[:, 25:26]     # joint 4: prop[25]
-        ], axis=-1)  # (num_latest_obs, 5)
-
-        # Extract gripper positions from separate gripper data
-        # Shape must be (num_latest_obs, 1) to match other components
-        left_gripper = gripper[:, 0:1]             # left gripper (1D) - keep dimension
-        right_gripper = gripper[:, 1:2]            # right gripper (1D) - keep dimension
-
-        # ====================================================================
-        # CRITICAL FIX: Use floating_base_actions instead of qvel
-        # ====================================================================
-        # OLD (WRONG): Used qvel[30:32, 33] - robot's actual physical velocity
-        # NEW (CORRECT): Use proprioception_floating_base_actions - accumulated control commands
-        #
-        # Why this matters:
-        # - qvel = physics engine's measured velocity (includes inertia, friction, collisions)
-        # - floating_base_actions = accumulated control commands (what we actually sent)
-        # - Actions are control commands, so observation should also be control-based
-        # - This ensures obs and action are in the same "space"
-        #
-        # Note: floating_base_actions is CUMULATIVE, but we only care about the value at each timestep
-        # The model will learn the relationship between current accumulated position and next action
-        # ====================================================================
-        
-        # Load floating base actions (accumulated control commands)
-        floating_base_actions = demo_data['obs']['proprioception_floating_base_actions']
-        mobile_base_accumulated = floating_base_actions[obs_indices, 0:3]  # (num_latest_obs, 3): x, y, yaw
-        
-        # For consistency with action processing, we DON'T convert this to velocity
-        # The actions are already in "delta position" form, and they get converted to velocity later
-        # So we use the accumulated position directly as observation
-        mobile_base_vel = mobile_base_accumulated  # Keep variable name for compatibility
-        
-        # Total 16D: torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1) + mobile_base_vel(3)
-        
-        # Concatenate proprioception for normalization
-        # Shape: (num_latest_obs, 16)
         proprioception_concat = np.concatenate([
-            mobile_base_vel,    # (T, 3)
-            torso,              # (T, 1)
-            left_arm,           # (T, 5)
-            left_gripper,       # (T, 1)
-            right_arm,          # (T, 5)
-            right_gripper,      # (T, 1)
-        ], axis=-1)  # (num_latest_obs, 16)
+            mobile_base_vel, torso, left_arm, left_gripper, right_arm, right_gripper
+        ], axis=-1)
         
-        # Normalize proprioception if enabled
+        # Normalize proprioception
         if self.normalize:
             proprioception_concat = self._normalize_to_range(
-                proprioception_concat, 
-                self.prop_min, 
-                self.prop_max
+                proprioception_concat, self.prop_min, self.prop_max
             )
-            # Split back after normalization
-            mobile_base_vel = proprioception_concat[:, 0:3]
-            torso = proprioception_concat[:, 3:4]
-            left_arm = proprioception_concat[:, 4:9]
-            left_gripper = proprioception_concat[:, 9:10]
-            right_arm = proprioception_concat[:, 10:15]
-            right_gripper = proprioception_concat[:, 15:16]
         
-        # Load actions for prediction horizon
+        # Split normalized proprioception
+        mobile_base_vel = proprioception_concat[:, 0:3]
+        torso = proprioception_concat[:, 3:4]
+        left_arm = proprioception_concat[:, 4:9]
+        left_gripper = proprioception_concat[:, 9:10]
+        right_arm = proprioception_concat[:, 10:15]
+        right_gripper = proprioception_concat[:, 15:16]
+        
+        # Load and process actions
         action_indices = range(start_frame, start_frame + self.action_prediction_horizon)
-        actions = demo_data['actions'][action_indices]
+        actions = demo_data['actions'][action_indices].copy()
         
-        # Convert mobile base action from delta position to velocity (to match BRS convention)
-        # BigYM stores delta position, but BRS uses velocity
-        # velocity = delta_position / dt, where dt = 1/50 = 0.02s (50Hz control frequency)
+        # Convert delta to velocity for mobile_base and torso
         dt = 0.02
-        actions_converted = actions.copy()
-        actions_converted[:, 0:3] = actions[:, 0:3] / dt  # Convert mobile base to velocity
+        actions[:, :4] /= dt  # Mobile base X, Y, Torso Z, Mobile base RZ
         
-        # Normalize actions if enabled (after conversion)
         if self.normalize:
-            actions_converted = self._normalize_to_range(actions_converted, self.action_min, self.action_max)
+            actions = self._normalize_to_range(actions, self.action_min, self.action_max)
         
-        mobile_base_actions = actions_converted[:, 0:3].astype(np.float32)  # 3 dims (now velocity)
-        torso_actions = actions_converted[:, 3:4].astype(np.float32)        # 1 dim
-        arms_actions = actions_converted[:, 4:16].astype(np.float32)        # 12 dims
+        # Split actions into components
+        mobile_base_actions = np.concatenate([actions[:, 0:2], actions[:, 3:4]], axis=-1)
+        torso_actions = actions[:, 2:3]
+        arms_actions = actions[:, 4:16]
         
-        action_chunks = {
-            "mobile_base": mobile_base_actions,
-            "torso": torso_actions,
-            "arms": arms_actions,
-        }
-        
-        # Load point clouds for observation window from PCD files
-        pcd_xyz_list = []
-        pcd_rgb_list = []
-        
-        for frame_idx in obs_indices:
-            xyz, rgb = self._load_multi_camera_pcd(demo_id, frame_idx)
-            pcd_xyz_list.append(xyz)
-            pcd_rgb_list.append(rgb)
-        
-        # Determine fixed max_points for all frames in this sample
+        # Load point clouds from PCD files
         max_points_fixed = self.max_points_per_camera * len(self.cameras)
-        
-        # Pad/crop to fixed size for batching
         pcd_xyz_padded = np.zeros((self.num_latest_obs, max_points_fixed, 3), dtype=np.float32)
         pcd_rgb_padded = np.zeros((self.num_latest_obs, max_points_fixed, 3), dtype=np.float32)
         
-        for t, (xyz, rgb) in enumerate(zip(pcd_xyz_list, pcd_rgb_list)):
+        for t, frame_idx in enumerate(obs_indices):
+            xyz, rgb = self._load_multi_camera_pcd(demo_id, frame_idx)
             n = min(len(xyz), max_points_fixed)
             pcd_xyz_padded[t, :n] = xyz[:n]
             pcd_rgb_padded[t, :n] = rgb[:n]
         
-        # Create observation dict
-        # 16D proprioception: torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1) + mobile_base_vel(3)
-        obs = {
+        # Construct output dictionary
+        return {
             "odom": {
-                "base_velocity": mobile_base_vel.astype(np.float32),  # (num_latest_obs, 3)
+                "base_velocity": mobile_base_vel.astype(np.float32),
             },
             "qpos": {
-                "torso": torso.astype(np.float32),                    # (num_latest_obs, 1)
-                "left_arm": left_arm.astype(np.float32),              # (num_latest_obs, 5)
-                "left_gripper": left_gripper.astype(np.float32),      # (num_latest_obs, 1)
-                "right_arm": right_arm.astype(np.float32),            # (num_latest_obs, 5)
-                "right_gripper": right_gripper.astype(np.float32),    # (num_latest_obs, 1)
+                "torso": torso.astype(np.float32),
+                "left_arm": left_arm.astype(np.float32),
+                "left_gripper": left_gripper.astype(np.float32),
+                "right_arm": right_arm.astype(np.float32),
+                "right_gripper": right_gripper.astype(np.float32),
             },
             "pointcloud": {
                 "xyz": pcd_xyz_padded,
                 "rgb": pcd_rgb_padded,
-            }
-        }
-        
-        # Expand action_chunks to match observation window size (replicate for each obs)
-        # Shape: (num_latest_obs, action_prediction_horizon, dim)
-        # No padding needed - using BigYM native dimensions: mobile_base(3), torso(1), arms(12)
-        action_chunks = {
-            "mobile_base": np.tile(mobile_base_actions[None, :, :], (self.num_latest_obs, 1, 1)),  # (T_obs, T_act, 3)
-            "torso": np.tile(torso_actions[None, :, :], (self.num_latest_obs, 1, 1)),              # (T_obs, T_act, 1)
-            "arms": np.tile(arms_actions[None, :, :], (self.num_latest_obs, 1, 1)),                # (T_obs, T_act, 12)
-        }
-        
-        # Padding mask (all valid)
-        pad_mask = np.ones((self.num_latest_obs, self.action_prediction_horizon), dtype=np.float32)
-        
-        return {
-            **obs,
-            "action_chunks": action_chunks,
-            "pad_mask": pad_mask,
+            },
+            "action_chunks": {
+                "mobile_base": np.tile(mobile_base_actions[None, :, :], (self.num_latest_obs, 1, 1)).astype(np.float32),
+                "torso": np.tile(torso_actions[None, :, :], (self.num_latest_obs, 1, 1)).astype(np.float32),
+                "arms": np.tile(arms_actions[None, :, :], (self.num_latest_obs, 1, 1)).astype(np.float32),
+            },
+            "pad_mask": np.ones((self.num_latest_obs, self.action_prediction_horizon), dtype=np.float32),
         }
 
 
