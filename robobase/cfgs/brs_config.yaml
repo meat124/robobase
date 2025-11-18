@@ -4,7 +4,7 @@
 run_name: "brs_policy_test"
 
 # ====== Main cfg (from cfg.yaml) ======
-seed: -1
+seed: 42
 gpus: 1
 lr: 0.0007  # 7e-4
 use_cosine_lr: true
@@ -63,7 +63,7 @@ pointnet_n_coordinates: 3
 pointnet_n_color: 3
 pointnet_hidden_depth: 2
 pointnet_hidden_dim: 256  # Paper original setting
-pcd_downsample_points: 512
+pcd_downsample_points: 2048  # 2048 points (between our initial 512 and original 4096)
 
 # ====== Transformer ======
 # Paper's original hyperparameters from brs-algo
@@ -113,3 +113,4 @@ demo_ids: null  # null means auto-discover from pcd_root directory
 normalize: true  # Enable normalization to [-1, 1] for actions and proprioception
 action_stats_path: "../data/demonstrations/0.9.0/action_stats.json"  # Path to action statistics
 prop_stats_path: "../data/demonstrations/0.9.0/prop_stats.json"  # Path to proprioception statistics
+pcd_stats_path: "../data/demonstrations/0.9.0/pcd_stats.json"  # Path to PCD XYZ statistics

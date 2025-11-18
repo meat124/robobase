@@ -44,6 +44,7 @@ class PCDBRSDataset(Dataset):
         subsample_points: bool = True,
         action_stats_path: Optional[str] = None,
         prop_stats_path: Optional[str] = None,
+        pcd_stats_path: Optional[str] = None,
         normalize: bool = True,
     ):
         """
@@ -58,7 +59,8 @@ class PCDBRSDataset(Dataset):
             subsample_points: Whether to randomly subsample points
             action_stats_path: Path to action statistics JSON file
             prop_stats_path: Path to proprioception statistics JSON file
-            normalize: Whether to normalize actions and proprioception to [-1, 1]
+            pcd_stats_path: Path to PCD XYZ statistics JSON file
+            normalize: Whether to normalize actions, proprioception, and PCD XYZ to [-1, 1]
         """
         self.hdf5_path = Path(hdf5_path)
         self.pcd_root = Path(pcd_root)
@@ -76,15 +78,20 @@ class PCDBRSDataset(Dataset):
                 action_stats_path = self.hdf5_path.parent / "action_stats.json"
             if prop_stats_path is None:
                 prop_stats_path = self.hdf5_path.parent / "prop_stats.json"
+            if pcd_stats_path is None:
+                pcd_stats_path = self.hdf5_path.parent / "pcd_stats.json"
             
             print(f"Loading normalization stats:")
             print(f"  - Action stats: {action_stats_path}")
             print(f"  - Prop stats: {prop_stats_path}")
+            print(f"  - PCD stats: {pcd_stats_path}")
             
             with open(action_stats_path, 'r') as f:
                 self.action_stats = json.load(f)
             with open(prop_stats_path, 'r') as f:
                 self.prop_stats = json.load(f)
+            with open(pcd_stats_path, 'r') as f:
+                self.pcd_stats = json.load(f)
             
             # Convert to numpy arrays - extract from nested structure
             # JSON format: {"mobile_base": {"min": [...], "max": [...]}, "torso": {...}, "arms": {...}}
@@ -131,6 +138,10 @@ class PCDBRSDataset(Dataset):
             
             self.prop_min = np.array(prop_min_list)
             self.prop_max = np.array(prop_max_list)
+            
+            # PCD XYZ normalization (3D: x, y, z)
+            self.pcd_xyz_min = np.array(self.pcd_stats['xyz']['min'], dtype=np.float32)
+            self.pcd_xyz_max = np.array(self.pcd_stats['xyz']['max'], dtype=np.float32)
         else:
             print("Normalization disabled")
         
@@ -275,6 +286,10 @@ class PCDBRSDataset(Dataset):
             xyz = xyz[indices]
             rgb = rgb[indices]
         
+        # Normalize XYZ to [-1, 1] range
+        if self.normalize:
+            xyz = self._normalize_to_range(xyz, self.pcd_xyz_min, self.pcd_xyz_max)
+        
         return xyz, rgb
     
     def _load_multi_camera_pcd(self, demo_id: str, frame_idx: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -396,29 +411,63 @@ class PCDBRSDataset(Dataset):
         
         # Joint positions (proprioception) - 16D total
         # Total 60D = 30D qpos + 30D qvel
-        # qpos [0-29]: pelvis(4) + left_arm(5) + left_gripper(8) + right_arm(5) + right_gripper(8)
+        # qpos [0-29]: Structure discovered through correlation analysis:
+        #   [0-4]: left_arm (5 joints) - correlation 0.997 with actions
+        #   [5-12]: left_gripper related (8D)
+        #   [13-17]: right_arm (5 joints) - correlation 0.999 with actions
+        #   [18-25]: right_gripper related (8D)
+        #   [2]: torso (pelvis_z)
         # qvel [30-59]: same structure as qpos
         proprioception = demo_data['obs']['proprioception']
         prop_data = proprioception[obs_indices]  # (num_latest_obs, 60)
         gripper = demo_data['obs']['proprioception_grippers'][obs_indices]
         
         # Extract from qpos (0-29) - POSITION ONLY
-        torso = prop_data[:, 2:3]                  # [2]: pelvis_z (1D)
-        left_arm = prop_data[:, 4:9]               # [4-8]: left arm 5 joints (5D)
-        right_arm = prop_data[:, 17:22]            # [17-21]: right arm 5 joints (5D)
+        # CRITICAL FIX: Corrected indices based on exhaustive correlation analysis
+        # Arms have non-consecutive indices - joint 4 is stored separately
+        torso = prop_data[:, 27:28]                # [27]: torso (1D)
+        
+        # Left arm: joints 0-3 are consecutive, joint 4 is at index 12
+        left_arm = np.concatenate([
+            prop_data[:, 0:4],      # joints 0-3: prop[0:4]
+            prop_data[:, 12:13]     # joint 4: prop[12]
+        ], axis=-1)  # (num_latest_obs, 5)
+        
+        # Right arm: joints 0-3 are consecutive, joint 4 is at index 25
+        right_arm = np.concatenate([
+            prop_data[:, 13:17],    # joints 0-3: prop[13:17]
+            prop_data[:, 25:26]     # joint 4: prop[25]
+        ], axis=-1)  # (num_latest_obs, 5)
 
         # Extract gripper positions from separate gripper data
         # Shape must be (num_latest_obs, 1) to match other components
         left_gripper = gripper[:, 0:1]             # left gripper (1D) - keep dimension
         right_gripper = gripper[:, 1:2]            # right gripper (1D) - keep dimension
 
-
-        # Mobile base VELOCITY from qvel (30-59) - to match BRS convention
-        # BRS uses velocity for both observation and action
-        mobile_base_vel = np.concatenate([
-            prop_data[:, 30:32],   # [30-31]: x_vel, y_vel
-            prop_data[:, 33:34],   # [33]: rz_vel (skip index 32 which is pelvis_z_vel)
-        ], axis=-1)  # (num_latest_obs, 3)
+        # ====================================================================
+        # CRITICAL FIX: Use floating_base_actions instead of qvel
+        # ====================================================================
+        # OLD (WRONG): Used qvel[30:32, 33] - robot's actual physical velocity
+        # NEW (CORRECT): Use proprioception_floating_base_actions - accumulated control commands
+        #
+        # Why this matters:
+        # - qvel = physics engine's measured velocity (includes inertia, friction, collisions)
+        # - floating_base_actions = accumulated control commands (what we actually sent)
+        # - Actions are control commands, so observation should also be control-based
+        # - This ensures obs and action are in the same "space"
+        #
+        # Note: floating_base_actions is CUMULATIVE, but we only care about the value at each timestep
+        # The model will learn the relationship between current accumulated position and next action
+        # ====================================================================
+        
+        # Load floating base actions (accumulated control commands)
+        floating_base_actions = demo_data['obs']['proprioception_floating_base_actions']
+        mobile_base_accumulated = floating_base_actions[obs_indices, 0:3]  # (num_latest_obs, 3): x, y, yaw
+        
+        # For consistency with action processing, we DON'T convert this to velocity
+        # The actions are already in "delta position" form, and they get converted to velocity later
+        # So we use the accumulated position directly as observation
+        mobile_base_vel = mobile_base_accumulated  # Keep variable name for compatibility
         
         # Total 16D: torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1) + mobile_base_vel(3)
         
@@ -599,6 +648,7 @@ class PCDDataModule(pl.LightningDataModule):
         normalize: bool = True,
         action_stats_path: Optional[str] = None,
         prop_stats_path: Optional[str] = None,
+        pcd_stats_path: Optional[str] = None,
     ):
         super().__init__()
         self.hdf5_path = hdf5_path
@@ -613,6 +663,10 @@ class PCDDataModule(pl.LightningDataModule):
         self.val_split_ratio = val_split_ratio
         self.dataloader_num_workers = dataloader_num_workers
         self.seed = seed
+        self.normalize = normalize
+        self.action_stats_path = action_stats_path
+        self.prop_stats_path = prop_stats_path
+        self.pcd_stats_path = pcd_stats_path
         self.normalize = normalize
         self.action_stats_path = action_stats_path
         self.prop_stats_path = prop_stats_path
@@ -655,6 +709,7 @@ class PCDDataModule(pl.LightningDataModule):
             normalize=self.normalize,
             action_stats_path=self.action_stats_path,
             prop_stats_path=self.prop_stats_path,
+            pcd_stats_path=self.pcd_stats_path,
         )
         
         self.val_dataset = PCDBRSDataset(
@@ -669,6 +724,7 @@ class PCDDataModule(pl.LightningDataModule):
             normalize=self.normalize,
             action_stats_path=self.action_stats_path,
             prop_stats_path=self.prop_stats_path,
+            pcd_stats_path=self.pcd_stats_path,
         )
     
     def train_dataloader(self):
