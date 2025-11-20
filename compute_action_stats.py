@@ -23,7 +23,9 @@ def compute_action_stats(hdf5_path: str, output_json: str = None):
     # Control frequency for velocity conversion
     dt = 0.02  # 50Hz = 1/50 = 0.02s
     
-    all_actions = []
+    all_mobile_base = []
+    all_torso_absolute = []
+    all_arms = []
     demo_ids = list(f['data'].keys())
     
     print(f"Found {len(demo_ids)} demos")
@@ -31,60 +33,68 @@ def compute_action_stats(hdf5_path: str, output_json: str = None):
     for demo_id in demo_ids:
         actions = f['data'][demo_id]['actions'][:]
         
-        # NOTE: Actions are DELTA POSITION (not velocity)
-        # BigYM uses JointPositionActionMode with delta control
-        # No conversion needed - use delta directly for statistics
-        # Typical delta ranges: mobile_base ~0.01m, torso ~0.01m, arms ~0.5rad
+        # Convert mobile base deltas to velocity
+        mobile_base_velocity = actions[:, [0, 1, 3]].copy()  # X, Y, RZ
+        mobile_base_velocity /= dt
         
-        all_actions.append(actions)  # Use delta directly
+        # Convert torso deltas to absolute positions
+        # Get initial torso position from floating_base_actions
+        floating_base = f['data'][demo_id]['obs']['proprioception_floating_base_actions'][:]
+        initial_torso_pos = floating_base[0, 2]  # Initial Z position
+        torso_deltas = actions[:, 2]
+        torso_absolute = initial_torso_pos + np.cumsum(torso_deltas)  # Accumulate deltas
+        
+        # Arms are already absolute positions
+        arms = actions[:, 4:16]
+        
+        all_mobile_base.append(mobile_base_velocity)
+        all_torso_absolute.append(torso_absolute)
+        all_arms.append(arms)
+        
         print(f"  {demo_id}: {actions.shape[0]} frames")
     
     # Concatenate all actions
-    all_actions = np.concatenate(all_actions, axis=0)
-    print(f"\nTotal actions: {all_actions.shape}")
+    all_mobile_base = np.concatenate(all_mobile_base, axis=0)
+    all_torso_absolute = np.concatenate(all_torso_absolute, axis=0)
+    all_arms = np.concatenate(all_arms, axis=0)
+    
+    print(f"\nTotal frames: {all_mobile_base.shape[0]}")
     
     # Compute statistics
-    # Mobile base: [X, Y] (indices 0-1) + [RZ] (index 3)
-    # Torso: [Z] (index 2)
-    # Arms: [4:16]
-    mobile_base_xy = all_actions[:, 0:2]
-    mobile_base_rz = all_actions[:, 3:4]
-    mobile_base = np.concatenate([mobile_base_xy, mobile_base_rz], axis=1)  # Shape: (N, 3)
-    
     stats = {
         "mobile_base": {
-            "min": mobile_base.min(axis=0).tolist(),
-            "max": mobile_base.max(axis=0).tolist(),
-            "mean": mobile_base.mean(axis=0).tolist(),
-            "std": mobile_base.std(axis=0).tolist(),
+            "min": all_mobile_base.min(axis=0).tolist(),
+            "max": all_mobile_base.max(axis=0).tolist(),
+            "mean": all_mobile_base.mean(axis=0).tolist(),
+            "std": all_mobile_base.std(axis=0).tolist(),
         },
         "torso": {
-            "min": float(all_actions[:, 2].min()),
-            "max": float(all_actions[:, 2].max()),
-            "mean": float(all_actions[:, 2].mean()),
-            "std": float(all_actions[:, 2].std()),
+            "min": float(all_torso_absolute.min()),
+            "max": float(all_torso_absolute.max()),
+            "mean": float(all_torso_absolute.mean()),
+            "std": float(all_torso_absolute.std()),
         },
         "arms": {
-            "min": all_actions[:, 4:16].min(axis=0).tolist(),
-            "max": all_actions[:, 4:16].max(axis=0).tolist(),
-            "mean": all_actions[:, 4:16].mean(axis=0).tolist(),
-            "std": all_actions[:, 4:16].std(axis=0).tolist(),
+            "min": all_arms.min(axis=0).tolist(),
+            "max": all_arms.max(axis=0).tolist(),
+            "mean": all_arms.mean(axis=0).tolist(),
+            "std": all_arms.std(axis=0).tolist(),
         },
     }
     
     # Print statistics
     print("\n" + "="*80)
-    print("ACTION STATISTICS (DELTA POSITION)")
+    print("ACTION STATISTICS")
     print("="*80)
     
-    print("\nMobile Base (X, Y, RZ) [DELTA POSITION m or rad]:")
+    print("\nMobile Base (X, Y, RZ) [VELOCITY m/s or rad/s]:")
     for i, (name) in enumerate(['x', 'y', 'rz']):
         print(f"  {name}: min={stats['mobile_base']['min'][i]:8.5f}, "
               f"max={stats['mobile_base']['max'][i]:8.5f}, "
               f"mean={stats['mobile_base']['mean'][i]:8.5f}, "
               f"std={stats['mobile_base']['std'][i]:8.5f}")
     
-    print("\nTorso (Z - pelvis_z) [DELTA POSITION m]:")
+    print("\nTorso (Z - pelvis_z) [ABSOLUTE POSITION m]:")
     print(f"  min={stats['torso']['min']:8.5f}, "
           f"max={stats['torso']['max']:8.5f}, "
           f"mean={stats['torso']['mean']:8.5f}, "

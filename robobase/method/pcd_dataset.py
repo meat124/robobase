@@ -71,6 +71,7 @@ class PCDBRSDataset(Dataset):
         self.max_points_per_camera = max_points_per_camera
         self.subsample_points = subsample_points
         self.normalize = normalize
+        self.dt = 0.02  # Control timestep (50Hz)
         
         # Load normalization statistics
         if self.normalize:
@@ -407,11 +408,34 @@ class PCDBRSDataset(Dataset):
         # Extract proprioception components
         prop_data = demo_data['obs']['proprioception'][obs_indices]
         gripper = demo_data['obs']['proprioception_grippers'][obs_indices]
-        floating_base = demo_data['obs']['proprioception_floating_base_actions'][obs_indices]
         
-        # Build proprioception observation (16D)
-        mobile_base_vel = np.concatenate([floating_base[:, 0:2], floating_base[:, 3:4]], axis=-1)  # X, Y, RZ
-        torso = floating_base[:, 2:3]  # Z (pelvis_z)
+        # Get positions from proprioception_floating_base (direct measurements, not accumulated)
+        floating_base = demo_data['obs']['proprioception_floating_base'][obs_indices]
+        
+        # Calculate mobile base velocity from position changes
+        # We need velocity that matches what the actions represent
+        if start_frame > 0:
+            # Get previous frame to compute velocity
+            prev_frame_idx = start_frame - 1
+            prev_floating_base = demo_data['obs']['proprioception_floating_base'][prev_frame_idx]
+            
+            # Compute velocity as (current_position - previous_position) / dt for each frame
+            mobile_base_vel = np.zeros((len(obs_indices), 3), dtype=np.float32)
+            for i, frame_idx in enumerate(obs_indices):
+                if i == 0:
+                    # First observation frame: use diff with previous frame
+                    mobile_base_vel[i] = (floating_base[i, [0, 1, 3]] - prev_floating_base[[0, 1, 3]]) / self.dt
+                else:
+                    # Subsequent frames: use diff with previous observation frame
+                    mobile_base_vel[i] = (floating_base[i, [0, 1, 3]] - floating_base[i-1, [0, 1, 3]]) / self.dt
+        else:
+            # First frame of demo: can't compute velocity from diff, approximate as zero or small value
+            mobile_base_vel = np.zeros((len(obs_indices), 3), dtype=np.float32)
+        
+        # Get torso absolute position directly from proprioception_floating_base
+        torso = floating_base[:, 2:3]  # Z position (pelvis_z)
+        
+        # Extract arm and gripper positions
         left_arm = np.concatenate([prop_data[:, 0:4], prop_data[:, 12:13]], axis=-1)
         left_gripper = gripper[:, 0:1]
         right_arm = np.concatenate([prop_data[:, 13:17], prop_data[:, 25:26]], axis=-1)
@@ -435,20 +459,30 @@ class PCDBRSDataset(Dataset):
         right_arm = proprioception_concat[:, 10:15]
         right_gripper = proprioception_concat[:, 15:16]
         
-        # Load and process actions
+        # Load and process actions (future actions for prediction)
+        dt = 0.02
         action_indices = range(start_frame, start_frame + self.action_prediction_horizon)
         actions = demo_data['actions'][action_indices].copy()
         
-        # NOTE: HDF5 actions are already in VELOCITY (converted in compute_action_stats.py)
-        # No need for delta-to-velocity conversion here!
+        # Convert torso deltas to absolute positions
+        # Start from the last observed torso position and accumulate deltas
+        current_torso_pos = floating_base[-1, 2]  # Last observed torso position from proprioception_floating_base
+        torso_deltas = actions[:, 2]  # Torso deltas from HDF5
+        torso_absolute = current_torso_pos + np.cumsum(torso_deltas)  # Accumulate to get absolute positions
+        
+        # Convert mobile base deltas to velocity
+        actions[:, [0, 1, 3]] /= dt  # Mobile base X, Y, RZ delta -> velocity
+        # Replace torso deltas with absolute positions
+        actions[:, 2] = torso_absolute
+        # Arms and grippers are already absolute positions
         
         if self.normalize:
             actions = self._normalize_to_range(actions, self.action_min, self.action_max)
         
         # Split actions into components
         mobile_base_actions = np.concatenate([actions[:, 0:2], actions[:, 3:4]], axis=-1)
-        torso_actions = actions[:, 2:3]
-        arms_actions = actions[:, 4:16]
+        torso_actions = actions[:, 2:3]  # Torso absolute position
+        arms_actions = actions[:, 4:16]  # Arms and grippers (absolute positions)
         
         # Load point clouds from PCD files
         max_points_fixed = self.max_points_per_camera * len(self.cameras)

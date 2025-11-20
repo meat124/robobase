@@ -39,37 +39,49 @@ def compute_prop_stats(hdf5_path: str, output_json: str = None):
     print(f"\nTotal prop: {all_prop.shape}, gripper: {all_gripper.shape}")
     
     # ====================================================================
-    # CRITICAL FIX: Use floating_base_actions instead of qvel
+    # CRITICAL FIX: Compute mobile base velocity from position changes
     # ====================================================================
-    # Load floating base accumulated actions
+    # Load floating base accumulated actions and compute velocities
     # floating_base_actions shape: (num_frames, 4) - X, Y, Z, RZ
-    # We split this into mobile_base (X, Y, RZ) and torso (Z)
-    all_floating_base = []
+    dt = 0.02  # Control timestep (50Hz)
+    
+    all_mobile_base_vel = []
+    all_torso_pos = []
+    
     for demo_id in demo_ids:
         floating_base = f['data'][demo_id]['obs']['proprioception_floating_base_actions'][:]
-        all_floating_base.append(floating_base)
-    all_floating_base = np.concatenate(all_floating_base, axis=0)
-    print(f"Total floating_base_actions: {all_floating_base.shape}")
+        
+        # Compute velocity from position changes: diff(position) / dt
+        position_diffs = np.diff(floating_base[:, [0, 1, 3]], axis=0)  # X, Y, RZ
+        velocities = position_diffs / dt
+        
+        # For first frame, approximate velocity as zero (or we could use the first computed velocity)
+        first_vel = np.zeros((1, 3), dtype=np.float32)
+        mobile_base_vel = np.concatenate([first_vel, velocities], axis=0)
+        
+        # Torso position (Z)
+        torso_pos = floating_base[:, 2:3]
+        
+        all_mobile_base_vel.append(mobile_base_vel)
+        all_torso_pos.append(torso_pos)
     
-    # Extract mobile_base (X, Y, RZ) and torso (Z) from floating_base_actions
-    mobile_base_xy = all_floating_base[:, 0:2]  # X, Y
-    mobile_base_rz = all_floating_base[:, 3:4]  # RZ
-    mobile_base_combined = np.concatenate([mobile_base_xy, mobile_base_rz], axis=1)  # (N, 3)
-    torso_z = all_floating_base[:, 2:3]  # Z (pelvis_z)
+    all_mobile_base_vel = np.concatenate(all_mobile_base_vel, axis=0)
+    all_torso_pos = np.concatenate(all_torso_pos, axis=0)
+    print(f"Total mobile_base_vel: {all_mobile_base_vel.shape}, torso_pos: {all_torso_pos.shape}")
     
     # Compute statistics for each component (matching dataset structure)
     stats = {
-        "mobile_base_vel": {  # floating_base_actions X, Y, RZ (accumulated position)
-            "min": mobile_base_combined.min(axis=0).tolist(),
-            "max": mobile_base_combined.max(axis=0).tolist(),
-            "mean": mobile_base_combined.mean(axis=0).tolist(),
-            "std": mobile_base_combined.std(axis=0).tolist(),
+        "mobile_base_vel": {  # Velocity computed from position changes
+            "min": all_mobile_base_vel.min(axis=0).tolist(),
+            "max": all_mobile_base_vel.max(axis=0).tolist(),
+            "mean": all_mobile_base_vel.mean(axis=0).tolist(),
+            "std": all_mobile_base_vel.std(axis=0).tolist(),
         },
         "torso": {  # floating_base_actions Z (pelvis_z accumulated position)
-            "min": float(torso_z.min()),
-            "max": float(torso_z.max()),
-            "mean": float(torso_z.mean()),
-            "std": float(torso_z.std()),
+            "min": float(all_torso_pos.min()),
+            "max": float(all_torso_pos.max()),
+            "mean": float(all_torso_pos.mean()),
+            "std": float(all_torso_pos.std()),
         },
         "left_arm": {  # qpos[0:4, 12] - non-consecutive!
             "min": np.concatenate([all_prop[:, 0:4], all_prop[:, 12:13]], axis=1).min(axis=0).tolist(),
@@ -102,7 +114,7 @@ def compute_prop_stats(hdf5_path: str, output_json: str = None):
     print("PROPRIOCEPTION STATISTICS")
     print("="*80)
     
-    print("\nMobile Base Velocity (qvel[30,31,33]):")
+    print("\nMobile Base Velocity (computed from position changes):")
     for i, name in enumerate(['x_vel', 'y_vel', 'rz_vel']):
         print(f"  {name}: min={stats['mobile_base_vel']['min'][i]:8.5f}, "
               f"max={stats['mobile_base_vel']['max'][i]:8.5f}, "

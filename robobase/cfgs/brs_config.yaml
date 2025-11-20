@@ -4,7 +4,7 @@
 run_name: "brs_policy_test"
 
 # ====== Main cfg (from cfg.yaml) ======
-seed: 42
+seed: 10000
 gpus: 1
 lr: 0.0007  # 7e-4
 use_cosine_lr: true
