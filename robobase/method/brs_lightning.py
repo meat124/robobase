@@ -439,6 +439,46 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     with open(run_dir / "config.yaml", 'w') as f:
         yaml.dump(config, f)
     
+    # Copy stats files to run directory if using PCD dataset
+    if use_pcd:
+        import shutil
+        
+        # Get stats paths from config or use defaults
+        hdf5_path = Path(config.get('hdf5_path', ''))
+        action_stats_path = config.get('action_stats_path', None)
+        prop_stats_path = config.get('prop_stats_path', None)
+        pcd_stats_path = config.get('pcd_stats_path', None)
+        
+        # Use default paths if not specified
+        if action_stats_path is None and hdf5_path.exists():
+            action_stats_path = hdf5_path.parent / "action_stats.json"
+        if prop_stats_path is None and hdf5_path.exists():
+            prop_stats_path = hdf5_path.parent / "prop_stats.json"
+        if pcd_stats_path is None and hdf5_path.exists():
+            pcd_stats_path = hdf5_path.parent / "pcd_stats.json"
+        
+        # Copy stats files to run directory
+        stats_files_copied = []
+        for stats_name, stats_path in [
+            ("action_stats.json", action_stats_path),
+            ("prop_stats.json", prop_stats_path),
+            ("pcd_stats.json", pcd_stats_path),
+        ]:
+            if stats_path is not None:
+                stats_path = Path(stats_path)
+                if stats_path.exists():
+                    dest_path = run_dir / stats_name
+                    shutil.copy2(stats_path, dest_path)
+                    stats_files_copied.append(stats_name)
+                    print(f"  ✓ Copied {stats_name} to {dest_path}")
+                else:
+                    print(f"  ⚠ Stats file not found: {stats_path}")
+        
+        if stats_files_copied:
+            print(f"\nStats files saved to: {run_dir}")
+            print(f"  Files: {', '.join(stats_files_copied)}")
+        print()
+    
     # Create module and data module
     print("Creating module and data module...")
     module = create_module_from_config(config)

@@ -1,10 +1,10 @@
 # BRS Policy Configuration
 # Based on brs-algo cfg.yaml and arch/wbvima.yaml
 
-run_name: "brs_policy_test"
+run_name: "brs_policy_test_4"
 
 # ====== Main cfg (from cfg.yaml) ======
-seed: 10000
+seed: 42
 gpus: 1
 lr: 0.0007  # 7e-4
 use_cosine_lr: true
