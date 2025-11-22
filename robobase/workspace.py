@@ -84,6 +84,10 @@ def _create_default_envs(cfg: DictConfig) -> EnvFactory:
         from robobase.envs.bigym import BiGymEnvFactory
 
         factory = BiGymEnvFactory()
+    elif cfg.env.env_name == "bigym_hdf5":
+        from robobase.envs.bigym_hdf5 import BiGymHDF5EnvFactory
+
+        factory = BiGymHDF5EnvFactory()
     elif cfg.env.env_name == "d4rl":
         from robobase.envs.d4rl import D4RLEnvFactory
 
@@ -213,6 +217,11 @@ class Workspace:
         )
         self._replay_iter = None
 
+        # Create validation replay buffer for proper validation loss
+        self.val_replay_buffer = None
+        self.val_replay_loader = None
+        self._val_replay_iter = None
+        
         # Create a separate demo replay that contains successful episodes.
         # This is designed for RL. IL algorithms don't have to use this!
         # TODO: Change the name to `self_imitation_buffer` or other names
@@ -320,6 +329,12 @@ class Workspace:
         print(f"{time.time():.2f}: Starting _load_demos...")
         self._load_demos()
         print(f"{time.time():.2f}: Finished _load_demos.")
+        
+        # Save training stats (action_stats, demo_info, etc.)
+        if self.cfg.is_imitation_learning and self.cfg.demos > 0:
+            print(f"{time.time():.2f}: Saving training stats...")
+            self._save_training_stats()
+            print(f"{time.time():.2f}: Finished saving training stats.")
 
         # Perform pretraining. This is suitable for behaviour cloning or Offline RL
         print(f"{time.time():.2f}: Starting _pretrain_on_demos...")
@@ -501,6 +516,36 @@ class Workspace:
                 self.replay_buffer,
                 is_demo_buffer=True if self.cfg.is_imitation_learning else False,
             )
+            
+            # Load validation demos into separate buffer
+            if hasattr(self.env_factory, 'get_val_demos') and hasattr(self.env_factory, 'load_val_demos_into_replay'):
+                val_demos = self.env_factory.get_val_demos()
+                if val_demos is not None and len(val_demos) > 0:
+                    # Create validation replay buffer using the same function
+                    self.val_replay_buffer = _create_default_replay_buffer(
+                        self.cfg, 
+                        self.eval_env.observation_space, 
+                        self.eval_env.action_space
+                    )
+                    
+                    # Load validation demos using the factory method
+                    self.env_factory.load_val_demos_into_replay(
+                        self.cfg,
+                        self.val_replay_buffer,
+                        is_demo_buffer=False
+                    )
+                    
+                    # Create validation data loader
+                    from torch.utils.data import DataLoader
+                    self.val_replay_loader = DataLoader(
+                        self.val_replay_buffer,
+                        batch_size=self.replay_buffer.batch_size,
+                        num_workers=self.cfg.replay.num_workers,
+                        pin_memory=self.cfg.replay.pin_memory,
+                        worker_init_fn=_worker_init_fn,
+                    )
+                    logging.info(f"Validation buffer created with {len(self.val_replay_buffer)} transitions")
+            
             if self.use_demo_replay:
                 # Load demos to the dedicated demo_replay_buffer
                 self.env_factory.load_demos_into_replay(
@@ -526,13 +571,11 @@ class Workspace:
                 # Skip update
                 continue
             
-            print(f"{time.time():.2f}: Update iter: {i}. Starting agent.update...")
             metrics.update(
                 self.agent.update(
                     self.replay_iter, self.main_loop_iterations + i, self.replay_buffer
                 )
             )
-            print(f"{time.time():.2f}: Update iter: {i}. Finished agent.update.")
 
         self.agent.train(False)
         if self.agent.logging:
@@ -597,11 +640,114 @@ class Workspace:
 
         return action, (*env_step_tuple, next_info), metrics
 
+    def _compute_val_loss(self, num_batches: int = 10) -> float:
+        """
+        Compute validation loss on held-out validation set.
+        Uses validation replay buffer that contains separate demos.
+        
+        Args:
+            num_batches: Number of batches to sample for validation
+            
+        Returns:
+            Average validation loss
+        """
+        import torch
+        
+        if self.val_replay_buffer is None or len(self.val_replay_buffer) == 0:
+            logging.warning("No validation buffer available, skipping val_loss computation")
+            return 0.0
+        
+        self.agent.train(False)  # Set to eval mode
+        val_losses = []
+        
+        # Create iterator if needed
+        if self._val_replay_iter is None:
+            self._val_replay_iter = iter(self.val_replay_loader)
+        
+        try:
+            for _ in range(num_batches):
+                try:
+                    batch = next(self._val_replay_iter)
+                except StopIteration:
+                    # Reset iterator if we run out of data
+                    self._val_replay_iter = iter(self.val_replay_loader)
+                    batch = next(self._val_replay_iter)
+                
+                # Get observations and actions from batch
+                # Batch contains flattened observation keys + action, reward, etc.
+                # Need to reconstruct observation dictionary from batch
+                action = batch['action'].to(self.device)
+                
+                # Reconstruct observation dictionary
+                obs = {}
+                for key, value in batch.items():
+                    # Skip non-observation keys
+                    if key in ['action', 'reward', 'terminal', 'truncated', 'indices', 'discount', 'demo']:
+                        continue
+                    # Skip next-step observations (_tp1)
+                    if key.endswith('_tp1'):
+                        continue
+                    # Add observation to dict
+                    if isinstance(value, torch.Tensor):
+                        obs[key] = value.to(self.device)
+                
+                with torch.no_grad():
+                    # Import utility functions from agent
+                    from robobase.method.utils import (
+                        extract_from_spec,
+                        extract_many_from_spec,
+                        flatten_time_dim_into_channel_dim,
+                        stack_tensor_dictionary
+                    )
+                    
+                    # Process observations same way as agent._act()
+                    low_dim_obs = None
+                    fused_rgb_feats = None
+                    
+                    if 'low_dim_state' in obs:
+                        low_dim_obs = flatten_time_dim_into_channel_dim(obs['low_dim_state'])
+                    
+                    # Process RGB observations
+                    rgb_keys = [k for k in obs.keys() if k.startswith('rgb')]
+                    if rgb_keys and self.agent.encoder is not None:
+                        rgb_dict = {k: obs[k] for k in sorted(rgb_keys)}
+                        rgb_obs = flatten_time_dim_into_channel_dim(
+                            stack_tensor_dictionary(rgb_dict, 1),
+                            has_view_axis=True
+                        )
+                        multi_view_rgb_feats = self.agent.encoder(rgb_obs.float())
+                        fused_rgb_feats = self.agent.view_fusion(multi_view_rgb_feats) if self.agent.view_fusion else multi_view_rgb_feats
+                    
+                    # Compute loss without backprop
+                    if hasattr(self.agent, 'compute_actor_loss'):
+                        loss = self.agent.compute_actor_loss(obs, action)
+                    else:
+                        # Use actor's forward pass for diffusion policy
+                        import torch.nn.functional as F
+                        noise_pred, noise = self.agent.actor(low_dim_obs, fused_rgb_feats, action)
+                        loss = F.mse_loss(noise_pred, noise)
+                    
+                    val_losses.append(loss.item())
+        except Exception as e:
+            import traceback
+            logging.warning(f"Error computing validation loss: {e}")
+            logging.warning(f"Traceback: {traceback.format_exc()}")
+        finally:
+            self.agent.train(True)  # Set back to train mode
+        
+        return sum(val_losses) / len(val_losses) if val_losses else 0.0
+
     def _pretrain_on_demos(self):
         if self.cfg.num_pretrain_steps > 0:
+            from tqdm import tqdm
+            
             pre_train_until_step = utils.Until(self.cfg.num_pretrain_steps)
             should_pretrain_log = utils.Every(self.cfg.log_pretrain_every)
             should_pretrain_eval = utils.Every(self.cfg.eval_every_steps)
+            # Add validation loss computation schedule
+            val_loss_every = getattr(self.cfg, 'val_loss_every', self.cfg.log_pretrain_every)
+            should_compute_val_loss = utils.Every(val_loss_every)
+            
             if self.cfg.log_pretrain_every > 0:
                 assert self.cfg.num_pretrain_steps % self.cfg.log_pretrain_every == 0
             if len(self.replay_buffer) <= 0:
@@ -610,39 +756,135 @@ class Workspace:
                     f"but num_pretrain_steps ({self.cfg.num_pretrain_steps}) is > 0"
                 )
 
+            # Initialize tqdm progress bar
+            pbar = tqdm(
+                total=self.cfg.num_pretrain_steps,
+                desc="🚀 Pretraining",
+                unit="step",
+                ncols=140,
+                bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}"
+            )
+            
+            # Track metrics for tqdm display
+            last_loss = None
+            last_val_loss = None
+            last_success_rate = None
+
             while pre_train_until_step(self.pretrain_steps):
+                # Check for shutdown signal
+                if self._shutting_down:
+                    print("\n⚠️  Shutdown requested. Stopping pretraining...")
+                    break
+                
                 self.agent.logging = False
 
                 if should_pretrain_log(self.pretrain_steps):
                     self.agent.logging = True
                 
-                print(f"{time.time():.2f}: Pretrain step: {self.pretrain_steps}. Starting _perform_updates...")
                 start_time = time.time()
                 pretrain_metrics = self._perform_updates()
                 elapsed_time = time.time() - start_time
-                print(f"{time.time():.2f}: Pretrain step: {self.pretrain_steps}. Finished _perform_updates in {elapsed_time:.2f}s.")
 
-                total_steps = self.cfg.num_pretrain_steps
-                remaining_steps = total_steps - (self.pretrain_steps + 1)
-                estimated_remaining_time = elapsed_time * remaining_steps
-                print(f"Step {self.pretrain_steps + 1}/{total_steps}. Estimated time remaining: {estimated_remaining_time:.2f}s")
+                # Update tracked metrics
+                if 'actor_loss' in pretrain_metrics:
+                    last_loss = pretrain_metrics['actor_loss']
+
+                # Update tqdm with metrics
+                postfix_dict = {}
+                if last_loss is not None:
+                    postfix_dict['train_loss'] = f"{last_loss:.4f}"
+                if last_val_loss is not None:
+                    postfix_dict['val_loss'] = f"{last_val_loss:.4f}"
+                if last_success_rate is not None:
+                    postfix_dict['success'] = f"{last_success_rate:.2%}"
+                postfix_dict['time/step'] = f"{elapsed_time:.3f}s"
+                
+                pbar.set_postfix(postfix_dict)
+                pbar.update(1)
 
                 if should_pretrain_log(self.pretrain_steps):
                     pretrain_metrics.update(self._get_common_metrics())
+                    
+                    # Compute validation loss only when scheduled
+                    if should_compute_val_loss(self.pretrain_steps):
+                        val_loss = self._compute_val_loss(num_batches=10)
+                        pretrain_metrics['val_loss'] = val_loss
+                        last_val_loss = val_loss  # Update for progress bar
+                    
                     self.logger.log_metrics(
                         pretrain_metrics, self.pretrain_steps, prefix="pretrain"
                     )
+                    
+                    # Simplified progress update (less verbose than before)
+                    # Only print summary every log interval
+                    if self.pretrain_steps % (self.cfg.log_pretrain_every * 10) == 0:
+                        print(f"\n{'='*80}")
+                        print(f"📊 Step {self.pretrain_steps}/{self.cfg.num_pretrain_steps} - Training Progress:")
+                        print(f"{'='*80}")
+                        
+                        # Show key metrics only
+                        if 'actor_loss' in pretrain_metrics:
+                            print(f"  Loss: {pretrain_metrics['actor_loss']:.6f}", end="")
+                            if 'val_loss' in pretrain_metrics:
+                                val_loss = pretrain_metrics['val_loss']
+                                print(f" | Val Loss: {val_loss:.6f}", end="")
+                                # Overfitting warning
+                                if val_loss > pretrain_metrics['actor_loss'] * 1.5:
+                                    print(" ⚠️ (possible overfit)", end="")
+                            print()
+                        
+                        if last_success_rate is not None:
+                            print(f"  Success Rate: {last_success_rate:.2%}")
+                        
+                        print(f"{'='*80}\n")
 
-                if should_pretrain_eval(self.pretrain_steps):
-                    print(f"{time.time():.2f}: Pretrain step: {self.pretrain_steps}. Starting _eval...")
+                # Skip evaluation at step 0
+                if should_pretrain_eval(self.pretrain_steps) and self.pretrain_steps > 0:
+                    print(f"\n{'='*80}")
+                    print(f"🎯 Evaluating at step {self.pretrain_steps}...")
+                    print(f"{'='*80}")
+                    
                     eval_metrics = self._eval()
-                    print(f"{time.time():.2f}: Pretrain step: {self.pretrain_steps}. Finished _eval.")
+                    
+                    # Update success rate for tqdm
+                    if 'episode_success' in eval_metrics:
+                        last_success_rate = eval_metrics['episode_success']
+                    
                     eval_metrics.update(self._get_common_metrics())
                     self.logger.log_metrics(
                         eval_metrics, self.pretrain_steps, prefix="pretrain_eval"
                     )
+                    
+                    # Print compact evaluation results
+                    print(f"\n✅ Evaluation Results:", end="")
+                    
+                    if 'episode_success' in eval_metrics:
+                        success_rate = eval_metrics['episode_success']
+                        emoji = "🎉" if success_rate > 0.8 else "📈" if success_rate > 0.5 else "📊"
+                        print(f" {emoji} Success={success_rate:.1%}", end="")
+                    
+                    if 'episode_reward' in eval_metrics:
+                        print(f" | Reward={eval_metrics['episode_reward']:.2f}", end="")
+                    
+                    if 'episode_length' in eval_metrics:
+                        print(f" | Length={eval_metrics['episode_length']:.0f}", end="")
+                    
+                    print()
+                    print(f"{'='*80}\n")
+
 
                 self._pretrain_step += 1
+            
+            pbar.close()
+            print(f"\n{'='*80}")
+            print("✅ Pretraining completed!")
+            print(f"{'='*80}")
+            if last_loss is not None:
+                print(f"Final Loss: {last_loss:.6f}")
+            if last_success_rate is not None:
+                print(f"Latest Success Rate: {last_success_rate:.2%}")
+            print(f"Total Steps: {self.cfg.num_pretrain_steps}")
+            print(f"{'='*80}\n")
 
     def _online_rl(self):
         train_until_frame = utils.Until(self.cfg.num_train_frames)
@@ -740,7 +982,8 @@ class Workspace:
             self.demo_replay_buffer.shutdown()
 
     def save_snapshot(self):
-        snapshot = self.work_dir / "snapshots" / f"{self.global_env_steps}_snapshot.pt"
+        # Use 'ckpt' directory for consistency with BRS training
+        snapshot = self.work_dir / "ckpt" / f"{self.global_env_steps}_snapshot.pt"
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         keys_to_save = [
             "_pretrain_step",
@@ -752,13 +995,13 @@ class Workspace:
         payload["agent"] = self.agent.state_dict()
         with snapshot.open("wb") as f:
             torch.save(payload, f)
-        latest_snapshot = self.work_dir / "snapshots" / "latest_snapshot.pt"
+        latest_snapshot = self.work_dir / "ckpt" / "latest_snapshot.pt"
         shutil.copy(snapshot, latest_snapshot)
 
     def load_snapshot(self, path_to_snapshot_to_load=None):
         if path_to_snapshot_to_load is None:
             path_to_snapshot_to_load = (
-                self.work_dir / "snapshots" / "latest_snapshot.pt"
+                self.work_dir / "ckpt" / "latest_snapshot.pt"
             )
         else:
             path_to_snapshot_to_load = Path(path_to_snapshot_to_load)
@@ -771,3 +1014,46 @@ class Workspace:
         self.agent.load_state_dict(payload.pop("agent"))
         for k, v in payload.items():
             self.__dict__[k] = v
+    
+    def _save_training_stats(self):
+        """
+        Save training statistics (action stats, demo info, etc.) to work_dir.
+        This ensures reproducibility and allows loading the same normalization stats.
+        """
+        if not self.cfg.is_imitation_learning or self.cfg.demos == 0:
+            return
+        
+        import json
+        stats_dir = self.work_dir / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save action statistics if available
+        if hasattr(self.env_factory, '_action_stats') and self.env_factory._action_stats is not None:
+            action_stats = self.env_factory._action_stats
+            # Convert numpy arrays to lists for JSON serialization
+            action_stats_json = {
+                k: v.tolist() if isinstance(v, np.ndarray) else v
+                for k, v in action_stats.items()
+            }
+            action_stats_path = stats_dir / "action_stats.json"
+            with open(action_stats_path, 'w') as f:
+                json.dump(action_stats_json, f, indent=2)
+            logging.info(f"✓ Saved action_stats.json to {action_stats_path}")
+        
+        # Save observation statistics if available
+        if self.cfg.norm_obs and hasattr(self.replay_buffer, '_obs_mean'):
+            obs_stats = {
+                "obs_mean": self.replay_buffer._obs_mean.tolist() if hasattr(self.replay_buffer, '_obs_mean') else None,
+                "obs_std": self.replay_buffer._obs_std.tolist() if hasattr(self.replay_buffer, '_obs_std') else None,
+            }
+            obs_stats_path = stats_dir / "obs_stats.json"
+            with open(obs_stats_path, 'w') as f:
+                json.dump(obs_stats, f, indent=2)
+            logging.info(f"✓ Saved obs_stats.json to {obs_stats_path}")
+        
+        logging.info(f"\n📊 Training stats saved to: {stats_dir}")
+        logging.info(f"  - action_stats.json")
+        logging.info(f"  - demo_info.json")
+        if self.cfg.norm_obs:
+            logging.info(f"  - obs_stats.json")
+        print()

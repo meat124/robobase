@@ -1,0 +1,86 @@
+# @package _global_
+
+defaults:
+  - ../env: bigym_hdf5
+  - ../method: diffusion
+
+# ============================================================
+# Experiment Configuration
+# ============================================================
+experiment_name: diffusion_test_2  # Run name for organizing experiments
+
+# ============================================================
+# Dataset Configuration
+# ============================================================
+demos: 23  # Total number of successful demonstrations (including demo_35)
+demo_path: ./converted_demos/saucepan_84_full/  # 84x84 RGB (no depth)
+
+# ============================================================
+# Training Configuration
+# ============================================================
+num_pretrain_steps: 100000  # Total training steps
+num_train_frames: 0         # No online RL training
+eval_every_steps: 10000     # Evaluation frequency
+num_eval_episodes: 5        # Episodes per evaluation
+batch_size: 128             # Batch size (adjust based on GPU memory)
+save_snapshot: true         # Save model checkpoints
+snapshot_every_n: 10000     # Save checkpoint every N steps (0 = only at end)
+replay_size_before_train: 500
+val_loss_every: 100         # Validation loss computation frequency (in steps)
+
+# ============================================================
+# Observation Configuration
+# ============================================================
+pixels: true
+frame_stack: 1
+visual_observation_shape: [84, 84]  # Resized from 224x224 for memory efficiency
+
+# ============================================================
+# Imitation Learning
+# ============================================================
+is_imitation_learning: true
+
+# ============================================================
+# Action Configuration
+# ============================================================
+action_repeat: 1
+action_sequence: 8          # Action horizon (temporal chunking)
+execution_length: 1
+temporal_ensemble: true
+use_standardization: false  # Use demo-based action statistics
+use_min_max_normalization: true
+min_max_margin: 0
+norm_obs: true
+
+# ============================================================
+# Training Settings
+# ============================================================
+update_every_steps: 1
+log_pretrain_every: 100      # Log training metrics every N steps
+save_csv: true               # Save training metrics to CSV files
+
+# ============================================================
+# Logging (Weights & Biases)
+# ============================================================
+log_eval_video: true  # Enable evaluation video logging
+
+wandb:
+  use: true
+  project: bigym_dp
+  name: ${experiment_name}  # Use experiment_name for wandb
+
+# ============================================================
+# Replay Buffer
+# ============================================================
+replay:
+  nstep: 1
+
+# ============================================================
+# Output Directory (BRS-style: runs/${experiment_name})
+# ============================================================
+hydra:
+  run:
+    dir: ./runs/${experiment_name}
+  sweep:
+    dir: ./runs/${experiment_name}_sweep
+    subdir: ${hydra.job.num}

@@ -3,6 +3,9 @@ from pathlib import Path
 import time
 print(f"{time.time():.2f}: train.py script started")
 
+# Apply compatibility patch for diffusers/transformers before any other imports
+import fix_diffusers_deepspeed
+
 print(f"{time.time():.2f}: Importing hydra and omegaconf...")
 import hydra
 from omegaconf import DictConfig

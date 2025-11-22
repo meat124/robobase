@@ -204,9 +204,28 @@ class Logger(object):
                 self._wandb_logs[key] = value
             else:
                 v = value if value.ndim == 3 else value[0]  # assume image
-                channel_first = v.shape[0] == 3
-                if channel_first:
-                    v = np.moveaxis(v, 0, -1)
+                
+                # Check if channel-first (C, H, W) format
+                # Assume channel-first if first dimension is 3 or 4 and is smallest dimension
+                if v.ndim == 3:
+                    channel_first = v.shape[0] in [3, 4] and v.shape[0] < min(v.shape[1], v.shape[2])
+                    if channel_first:
+                        v = np.moveaxis(v, 0, -1)  # (C, H, W) -> (H, W, C)
+                
+                # Ensure value range is correct for visualization
+                # wandb.Image accepts either uint8 [0, 255] or float [0, 1]
+                if v.dtype in [np.float32, np.float64]:
+                    # Clip to [0, 1] range to avoid display issues
+                    v = np.clip(v, 0.0, 1.0)
+                elif v.dtype == np.uint8:
+                    pass  # Already in correct format
+                else:
+                    # Convert other types to float32 [0, 1]
+                    v = v.astype(np.float32)
+                    if v.max() > 1.0:
+                        v = v / 255.0
+                    v = np.clip(v, 0.0, 1.0)
+                
                 self._wandb_logs[key] = wandb.Image(v)
         elif self._use_tb:
             if is_video:

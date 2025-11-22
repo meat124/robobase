@@ -1,0 +1,16 @@
+# @package _global_
+
+env:
+  env_name: bigym_hdf5  # Custom env name for HDF5 loader
+  episode_length: 3000
+  cameras: ["head", "right_wrist", "left_wrist"]
+  action_mode: absolute
+  floating: true
+  task_name: saucepan_to_hob  # Task name in snake_case
+  dataset_root: ""
+  demo_down_sample_rate: 20
+  render_mode: rgb_array
+  enable_all_floating_dof: false
+
+# Demo path will be specified in launch config
+demos: 23
