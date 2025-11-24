@@ -46,6 +46,7 @@ class PCDBRSDataset(Dataset):
         prop_stats_path: Optional[str] = None,
         pcd_stats_path: Optional[str] = None,
         normalize: bool = True,
+        normalize_pcd: bool = True,
     ):
         """
         Args:
@@ -60,7 +61,8 @@ class PCDBRSDataset(Dataset):
             action_stats_path: Path to action statistics JSON file
             prop_stats_path: Path to proprioception statistics JSON file
             pcd_stats_path: Path to PCD XYZ statistics JSON file
-            normalize: Whether to normalize actions, proprioception, and PCD XYZ to [-1, 1]
+            normalize: Whether to normalize actions and proprioception to [-1, 1]
+            normalize_pcd: Whether to normalize PCD XYZ to [-1, 1] (set False if already preprocessed)
         """
         self.hdf5_path = Path(hdf5_path)
         self.pcd_root = Path(pcd_root)
@@ -71,6 +73,7 @@ class PCDBRSDataset(Dataset):
         self.max_points_per_camera = max_points_per_camera
         self.subsample_points = subsample_points
         self.normalize = normalize
+        self.normalize_pcd = normalize_pcd
         self.dt = 0.02  # Control timestep (50Hz)
         
         # Load normalization statistics
@@ -287,8 +290,8 @@ class PCDBRSDataset(Dataset):
             xyz = xyz[indices]
             rgb = rgb[indices]
         
-        # Normalize XYZ to [-1, 1] range
-        if self.normalize:
+        # Normalize XYZ to [-1, 1] range (only if not already preprocessed)
+        if self.normalize_pcd:
             xyz = self._normalize_to_range(xyz, self.pcd_xyz_min, self.pcd_xyz_max)
         
         return xyz, rgb
@@ -346,6 +349,10 @@ class PCDBRSDataset(Dataset):
                 indices = np.random.choice(len(xyz), self.max_points_per_camera, replace=False)
                 xyz = xyz[indices]
                 rgb = rgb[indices]
+            
+            # Normalize XYZ to [-1, 1] range (only if not already preprocessed)
+            if self.normalize_pcd:
+                xyz = self._normalize_to_range(xyz, self.pcd_xyz_min, self.pcd_xyz_max)
             
             return xyz, rgb
             
@@ -596,6 +603,8 @@ class PCDDataModule(pl.LightningDataModule):
         action_stats_path: Optional[str] = None,
         prop_stats_path: Optional[str] = None,
         pcd_stats_path: Optional[str] = None,
+        normalize_pcd: bool = True,
+        subsample_points: bool = True,
     ):
         super().__init__()
         self.hdf5_path = hdf5_path
@@ -614,6 +623,8 @@ class PCDDataModule(pl.LightningDataModule):
         self.action_stats_path = action_stats_path
         self.prop_stats_path = prop_stats_path
         self.pcd_stats_path = pcd_stats_path
+        self.normalize_pcd = normalize_pcd
+        self.subsample_points = subsample_points
         self.normalize = normalize
         self.action_stats_path = action_stats_path
         self.prop_stats_path = prop_stats_path
@@ -652,11 +663,12 @@ class PCDDataModule(pl.LightningDataModule):
             num_latest_obs=self.num_latest_obs,
             action_prediction_horizon=self.action_prediction_horizon,
             max_points_per_camera=self.max_points_per_camera,
-            subsample_points=True,
+            subsample_points=self.subsample_points,  # Use config value
             normalize=self.normalize,
             action_stats_path=self.action_stats_path,
             prop_stats_path=self.prop_stats_path,
             pcd_stats_path=self.pcd_stats_path,
+            normalize_pcd=self.normalize_pcd,  # Separate flag for PCD normalization
         )
         
         self.val_dataset = PCDBRSDataset(
@@ -672,6 +684,7 @@ class PCDDataModule(pl.LightningDataModule):
             action_stats_path=self.action_stats_path,
             prop_stats_path=self.prop_stats_path,
             pcd_stats_path=self.pcd_stats_path,
+            normalize_pcd=self.normalize_pcd,  # Separate flag for PCD normalization
         )
     
     def train_dataloader(self):
