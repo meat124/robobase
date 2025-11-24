@@ -32,6 +32,7 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 # Import PCD dataset classes
 from robobase.method.pcd_dataset import PCDBRSDataset, PCDDataModule, pcd_brs_collate_fn
+from robobase.method.rollout_callback import RolloutEvaluationCallback
 
 # base 3 torso 1 left arm 5 left gripper 1 right arm 5 right gripper 1
 class DummyBRSDataset(Dataset):
@@ -360,6 +361,8 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             action_stats_path=config.get('action_stats_path', None),
             prop_stats_path=config.get('prop_stats_path', None),
             pcd_stats_path=config.get('pcd_stats_path', None),
+            normalize_pcd=config.get('normalize_pcd', True),  # Separate flag for PCD normalization
+            subsample_points=config.get('subsample_points', True),  # Control runtime downsampling
         )
     else:
         # Use real data module from brs-algo
@@ -438,6 +441,9 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     # Save config
     with open(run_dir / "config.yaml", 'w') as f:
         yaml.dump(config, f)
+    
+    # Store config for callbacks
+    trainer_config = config.copy()
     
     # Copy stats files to run directory if using PCD dataset
     if use_pcd:
@@ -545,6 +551,24 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     # Add LearningRateMonitor callback for better logging
     callbacks.append(LearningRateMonitor(logging_interval='step'))
     
+    # Add rollout evaluation callback if enabled
+    if config.get('rollout_eval', False) and use_pcd:
+        rollout_callback = RolloutEvaluationCallback(
+            eval_interval=config.get('rollout_eval_interval', 5),
+            num_eval_episodes=config.get('num_eval_episodes', 3),
+            log_video=config.get('log_eval_video', True),
+            max_episode_steps=config.get('max_episode_steps', 500),
+            env_name=config.get('env_name', 'ReachTarget'),
+            cameras=config.get('cameras', ['head', 'left_wrist', 'right_wrist']),
+            video_save_dir=str(run_dir / "eval_videos"),  # Save directly under run directory
+        )
+        callbacks.append(rollout_callback)
+        print(f"✓ Rollout evaluation enabled:")
+        print(f"  - Interval: every {config.get('rollout_eval_interval', 5)} epochs")
+        print(f"  - Episodes: {config.get('num_eval_episodes', 3)}")
+        print(f"  - Log video: {config.get('log_eval_video', True)}")
+        print(f"  - Video directory: {run_dir / 'eval_videos'}")
+    
     # Create trainer
     trainer = pl.Trainer(
         default_root_dir=run_dir,
@@ -560,6 +584,9 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
         precision='16-mixed',  # Use mixed precision for faster training
         profiler='simple',  # Enable profiler to identify bottlenecks
     )
+    
+    # Store config in trainer for callbacks
+    trainer.config = trainer_config
     
     # Train
     print("Starting training...")
