@@ -163,6 +163,8 @@ class DummyDataModule(pl.LightningDataModule):
         val_batch_size: int,
         val_split_ratio: float,
         dataloader_num_workers: int,
+        prefetch_factor: int = 4,
+        persistent_workers: bool = True,
         seed: Optional[int] = None,
     ):
         super().__init__()
@@ -174,6 +176,8 @@ class DummyDataModule(pl.LightningDataModule):
         self.val_batch_size = val_batch_size
         self.val_split_ratio = val_split_ratio
         self.dataloader_num_workers = dataloader_num_workers
+        self.prefetch_factor = prefetch_factor
+        self.persistent_workers = persistent_workers
         self.seed = seed
     
     def setup(self, stage: Optional[str] = None):
@@ -205,7 +209,8 @@ class DummyDataModule(pl.LightningDataModule):
             shuffle=True,
             num_workers=self.dataloader_num_workers,
             collate_fn=brs_collate_fn,
-            persistent_workers=self.dataloader_num_workers > 0
+            prefetch_factor=self.prefetch_factor if self.dataloader_num_workers > 0 else None,
+            persistent_workers=self.persistent_workers and self.dataloader_num_workers > 0
         )
     
     def val_dataloader(self):
@@ -215,7 +220,8 @@ class DummyDataModule(pl.LightningDataModule):
             shuffle=False,
             num_workers=self.dataloader_num_workers,
             collate_fn=brs_collate_fn,
-            persistent_workers=self.dataloader_num_workers > 0
+            prefetch_factor=self.prefetch_factor if self.dataloader_num_workers > 0 else None,
+            persistent_workers=self.persistent_workers and self.dataloader_num_workers > 0
         )
 
 
@@ -340,6 +346,8 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             val_batch_size=config['vbs'],
             val_split_ratio=config['val_split_ratio'],
             dataloader_num_workers=config['dataloader_num_workers'],
+            prefetch_factor=config.get('prefetch_factor', 4),
+            persistent_workers=config.get('persistent_workers', True),
             seed=config['seed'] if config['seed'] > 0 else None,
         )
     elif use_pcd:
@@ -348,14 +356,16 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             hdf5_path=config['hdf5_path'],
             pcd_root=config['pcd_root'],
             demo_ids=config.get('demo_ids', None),  # Auto-discover if not provided
-            cameras=config.get('cameras', ['head', 'left_wrist', 'right_wrist']),
+            cameras=config.get('cameras', ['head']),
             num_latest_obs=config['num_latest_obs'],
             action_prediction_horizon=config['action_prediction_horizon'],
-            max_points_per_camera=config.get('max_points_per_camera', 2048),
+            max_points_per_camera=config.get('max_points_per_camera', 4096),
             batch_size=config['bs'],
             val_batch_size=config['vbs'],
             val_split_ratio=config['val_split_ratio'],
             dataloader_num_workers=config['dataloader_num_workers'],
+            prefetch_factor=config.get('prefetch_factor', 4),
+            persistent_workers=config.get('persistent_workers', True),
             seed=config['seed'] if config['seed'] > 0 else None,
             normalize=config.get('normalize', True),
             action_stats_path=config.get('action_stats_path', None),
@@ -363,6 +373,8 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             pcd_stats_path=config.get('pcd_stats_path', None),
             normalize_pcd=config.get('normalize_pcd', True),  # Separate flag for PCD normalization
             subsample_points=config.get('subsample_points', True),  # Control runtime downsampling
+            preload_hdf5=config.get('preload_hdf5', False),
+            preload_pcd=config.get('preload_pcd', False),
         )
     else:
         # Use real data module from brs-algo
@@ -421,7 +433,7 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     print("="*80)
     print("BRS Policy Training (PyTorch Lightning)")
     print("="*80)
-    print(f"Run name: {config['run_name']}")
+    print(f"Run name: {config['wandb_name']}")
     print(f"Config: {config_path}")
     print(f"Data mode: {'PCD Dataset' if use_pcd else 'Dummy Dataset'}")
     if use_pcd:
@@ -434,9 +446,11 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     print(f"Action prediction horizon: {config['action_prediction_horizon']}")
     print()
     
-    # Create run directory
-    run_dir = Path("runs") / config['run_name']
+    # Create run directory - use wandb_name for consistency with wandb logging
+    wandb_name = config.get('wandb_name', config.get('wandb_run_name', config['wandb_name']))
+    run_dir = Path("runs") / wandb_name
     run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Run directory: {run_dir}")
     
     # Save config
     with open(run_dir / "config.yaml", 'w') as f:
@@ -501,9 +515,7 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     
     if config['use_wandb']:
         try:
-            # wandb_name 설정: config에 지정된 경우 사용, 없으면 wandb_run_name 사용
-            wandb_name = config.get('wandb_name', config.get('wandb_run_name', 'brs_training'))
-            
+            # wandb_name은 이미 run_dir 생성시 정의됨 (위에서)
             wandb_logger = WandbLogger(
                 project=config['wandb_project'],
                 name=wandb_name,
@@ -558,7 +570,7 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
             num_eval_episodes=config.get('num_eval_episodes', 3),
             log_video=config.get('log_eval_video', True),
             max_episode_steps=config.get('max_episode_steps', 500),
-            env_name=config.get('env_name', 'ReachTarget'),
+            env_name=config.get('env_name', 'SaucepanToHob'),
             cameras=config.get('cameras', ['head', 'left_wrist', 'right_wrist']),
             video_save_dir=str(run_dir / "eval_videos"),  # Save directly under run directory
         )
@@ -622,6 +634,8 @@ if __name__ == "__main__":
         help='Path to config file'
     )
     parser.add_argument('--use-pcd', action='store_true', help='Use PCD dataset instead of dummy data')
+    parser.add_argument('--hdf5-path', type=str, default=None, help='Path to HDF5 file (overrides config)')
+    parser.add_argument('--pcd-root', type=str, default=None, help='Path to PCD directory (overrides config)')
     parser.add_argument('--gpus', type=int, default=None, help='Number of GPUs')
     parser.add_argument('--bs', type=int, default=None, help='Batch size')
     parser.add_argument('--vbs', type=int, default=None, help='Validation batch size')
@@ -629,11 +643,20 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=None, help='Random seed')
     parser.add_argument('--no-wandb', action='store_true', help='Disable wandb')
     parser.add_argument('--wandb-name', type=str, default=None, help='Wandb run name (overrides config)')
+    parser.add_argument('--dataloader-num-workers', type=int, default=None, help='Number of dataloader workers')
+    parser.add_argument('--dataloader-prefetch-factor', type=int, default=None, help='Prefetch factor for dataloader')
+    parser.add_argument('--dataloader-persistent-workers', action='store_true', help='Use persistent workers')
+    parser.add_argument('--preload-hdf5', action='store_true', help='Preload all HDF5 data into RAM (~100MB)')
+    parser.add_argument('--preload-pcd', action='store_true', help='Preload all PCD data into RAM (~3GB)')
     
     args = parser.parse_args()
     
     # Prepare overrides
     overrides = {}
+    if args.hdf5_path is not None:
+        overrides['hdf5_path'] = args.hdf5_path
+    if args.pcd_root is not None:
+        overrides['pcd_root'] = args.pcd_root
     if args.gpus is not None:
         overrides['gpus'] = args.gpus
     if args.bs is not None:
@@ -648,6 +671,16 @@ if __name__ == "__main__":
         overrides['use_wandb'] = False
     if args.wandb_name is not None:
         overrides['wandb_name'] = args.wandb_name
+    if args.dataloader_num_workers is not None:
+        overrides['dataloader_num_workers'] = args.dataloader_num_workers
+    if args.dataloader_prefetch_factor is not None:
+        overrides['prefetch_factor'] = args.dataloader_prefetch_factor
+    if args.dataloader_persistent_workers:
+        overrides['persistent_workers'] = True
+    if args.preload_hdf5:
+        overrides['preload_hdf5'] = True
+    if args.preload_pcd:
+        overrides['preload_pcd'] = True
     
     # Get config path
     config_path = Path(args.config)

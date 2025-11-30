@@ -21,11 +21,16 @@ sys.path.insert(0, str(bigym_path))
 
 from bigym.envs.pick_and_place import SaucepanToHob
 from bigym.action_modes import JointPositionActionMode
-from bigym.robots.configs.h1 import H1
+from bigym.robots.configs.h1 import H1, PelvisDof
 from bigym.utils.observation_config import ObservationConfig, CameraConfig
 
 # Import video recording
 from robobase.video import VideoRecorder
+
+# Environment runs at 500Hz, but policy outputs actions at 50Hz (decimation=10)
+# Floating base actions in demo are SUM of 10 x 500Hz deltas
+# To replay correctly: divide floating base by 10, execute 10 env steps per policy action
+ENV_DECIMATION = 10
 
 
 def depth_to_pointcloud(
@@ -174,15 +179,25 @@ class RolloutEvaluationCallback(Callback):
                 print("Warning: No config found, normalization disabled")
                 return
         
+        # Store config for later use
+        self._config = config
+        
         # Load stats files
-        for stats_type in ['action', 'prop', 'pcd']:
-            stats_key = f'{stats_type}_stats_path'
-            if stats_key in config:
-                stats_path = Path(config[stats_key])
+        stats_paths = {
+            'action': config.get('action_stats_path'),
+            'prop': config.get('prop_stats_path'),
+            'pcd': config.get('pcd_stats_path'),
+        }
+        
+        for stats_type, stats_path in stats_paths.items():
+            if stats_path:
+                stats_path = Path(stats_path)
                 if stats_path.exists():
                     with open(stats_path, 'r') as f:
                         self._stats[stats_type] = json.load(f)
-                    print(f"  ✓ Loaded {stats_type} stats")
+                    print(f"  ✓ Loaded {stats_type} stats from {stats_path}")
+                else:
+                    print(f"  ⚠ {stats_type} stats not found: {stats_path}")
     
     def _create_env(self):
         """Create BigYM environment with RGB and depth observations"""
@@ -205,9 +220,17 @@ class RolloutEvaluationCallback(Callback):
         )
         
         if self.env_name == "SaucepanToHob":
+            # Include PelvisDof.Z (torso) for height control - required for manipulation tasks
+            # BRS Policy uses 16D actions: [X, Y, Z, RZ] + arms(10) + grippers(2)
+            floating_dofs = [PelvisDof.X, PelvisDof.Y, PelvisDof.Z, PelvisDof.RZ]
+            
             # Always use rgb_array render mode for video recording
             env = SaucepanToHob(
-                action_mode=JointPositionActionMode(floating_base=True, absolute=True),
+                action_mode=JointPositionActionMode(
+                    floating_base=True, 
+                    absolute=True,
+                    floating_dofs=floating_dofs
+                ),
                 robot_cls=H1,
                 render_mode='rgb_array',  # Required for video recording
                 observation_config=obs_config,
@@ -217,6 +240,47 @@ class RolloutEvaluationCallback(Callback):
         
         return env
     
+    def _brs_to_bigym_action(self, brs_action: np.ndarray) -> np.ndarray:
+        """
+        Convert BRS 16D action to BigYM 16D action format.
+        
+        BRS 16D structure:
+            [0:3]   mobile_base (3D): dx, dy, drz
+            [3:4]   torso (1D): dz
+            [4:9]   left_arm (5D): joint positions
+            [9:10]  left_gripper (1D): gripper position
+            [10:15] right_arm (5D): joint positions
+            [15:16] right_gripper (1D): gripper position
+        
+        BigYM 16D structure (with floating_dofs=[X, Y, Z, RZ]):
+            [0:4]   floating_base (4D): dx, dy, dz, drz
+            [4:9]   left_arm (5D): joint positions
+            [9:14]  right_arm (5D): joint positions
+            [14:15] left_gripper (1D): gripper position
+            [15:16] right_gripper (1D): gripper position
+        """
+        # Extract BRS action components
+        mobile_base = brs_action[0:3]     # dx, dy, drz
+        torso = brs_action[3:4]           # dz
+        left_arm = brs_action[4:9]        # 5D
+        left_gripper = brs_action[9:10]   # 1D
+        right_arm = brs_action[10:15]     # 5D
+        right_gripper = brs_action[15:16] # 1D
+        
+        # Build BigYM 16D action
+        # Note: BigYM expects [X, Y, Z, RZ] order for floating base
+        bigym_action = np.concatenate([
+            mobile_base[:2],   # [0:2]  X, Y
+            torso,             # [2:3]  Z (torso)
+            mobile_base[2:3],  # [3:4]  RZ
+            left_arm,          # [4:9]  left_arm
+            right_arm,         # [9:14] right_arm
+            left_gripper,      # [14:15] left_gripper
+            right_gripper,     # [15:16] right_gripper
+        ])
+        
+        return bigym_action
+
     def _obs_to_policy_input(
         self, 
         obs: Dict, 
@@ -225,42 +289,63 @@ class RolloutEvaluationCallback(Callback):
     ) -> Dict:
         """
         Convert BiGym observation to BRS policy input format.
-        Adapted from eval_brs.py
+        
+        BRS Proprioception (16D):
+            - mobile_base_vel (3): [vx, vy, vrz] from floating_base_actions/dt
+            - torso (1): z position from floating_base[2]
+            - left_arm (5): from qpos[0,1,2,3,12]
+            - left_gripper (1): from grippers[0]
+            - right_arm (5): from qpos[13,14,15,16,25]
+            - right_gripper (1): from grippers[1]
         """
-        # Extract proprioception from BiGym observation
-        prop_data = []
+        dt = 0.02  # 50Hz control
         
-        # mobile_base_vel (3): from proprioception_floating_base_actions
+        # Initialize proprioception components
+        mobile_base_vel = np.zeros(3, dtype=np.float32)
+        torso = np.zeros(1, dtype=np.float32)
+        left_arm = np.zeros(5, dtype=np.float32)
+        left_gripper = np.zeros(1, dtype=np.float32)
+        right_arm = np.zeros(5, dtype=np.float32)
+        right_gripper = np.zeros(1, dtype=np.float32)
+        
+        # Extract mobile_base_vel from floating_base_actions (delta actions)
         if 'proprioception_floating_base_actions' in obs:
-            base_vel = obs['proprioception_floating_base_actions']
-            if not isinstance(base_vel, np.ndarray):
-                base_vel = np.array(base_vel)
-            prop_data.append(base_vel.flatten()[:3])
+            fb_actions = np.array(obs['proprioception_floating_base_actions']).flatten()
+            # floating_base_actions: [dx, dy, dz, drz]
+            # Convert to velocity: [vx, vy, vrz]
+            mobile_base_vel[0] = fb_actions[0] / dt  # vx
+            mobile_base_vel[1] = fb_actions[1] / dt  # vy
+            mobile_base_vel[2] = fb_actions[3] / dt  # vrz (skip dz)
         
-        # torso (1) and arm joints (12): from proprioception
+        # Extract torso (z position) from floating_base
+        if 'proprioception_floating_base' in obs:
+            fb = np.array(obs['proprioception_floating_base']).flatten()
+            torso[0] = fb[2]  # z position
+        
+        # Extract arm joints from proprioception (qpos)
         if 'proprioception' in obs:
-            joints = obs['proprioception']
-            if not isinstance(joints, np.ndarray):
-                joints = np.array(joints)
-            prop_data.append(joints.flatten())
+            qpos = np.array(obs['proprioception']).flatten()
+            if len(qpos) >= 30:  # Full qpos available
+                # Left arm: qpos[0,1,2,3,12]
+                left_arm = np.array([qpos[0], qpos[1], qpos[2], qpos[3], qpos[12]])
+                # Right arm: qpos[13,14,15,16,25]
+                right_arm = np.array([qpos[13], qpos[14], qpos[15], qpos[16], qpos[25]])
         
-        # grippers (2): from proprioception_grippers
+        # Extract grippers
         if 'proprioception_grippers' in obs:
-            grippers = obs['proprioception_grippers']
-            if not isinstance(grippers, np.ndarray):
-                grippers = np.array(grippers)
-            prop_data.append(grippers.flatten())
+            grippers = np.array(obs['proprioception_grippers']).flatten()
+            left_gripper[0] = grippers[0]
+            right_gripper[0] = grippers[1]
         
-        if len(prop_data) == 0:
-            prop = np.zeros(config['prop_dim'], dtype=np.float32)
-        else:
-            prop = np.concatenate(prop_data, axis=-1).astype(np.float32)
-            # Ensure correct size
-            if prop.shape[0] != config['prop_dim']:
-                if prop.shape[0] < config['prop_dim']:
-                    prop = np.pad(prop, (0, config['prop_dim'] - prop.shape[0]))
-                else:
-                    prop = prop[:config['prop_dim']]
+        # Combine into 16D proprioception
+        prop = np.concatenate([
+            mobile_base_vel,  # 3
+            torso,            # 1
+            left_arm,         # 5
+            left_gripper,     # 1
+            right_arm,        # 5
+            right_gripper,    # 1
+        ]).astype(np.float32)
         
         # Extract point cloud from camera observations
         camera_names = ['head', 'left_wrist', 'right_wrist']  # Default cameras
@@ -298,7 +383,7 @@ class RolloutEvaluationCallback(Callback):
             pcd_rgb = np.concatenate(all_rgb, axis=0).astype(np.float32)
             
             # Downsample to target number of points
-            n_points = config.get('pcd_downsample_points', 6144)
+            n_points = config.get('pcd_downsample_points', 4096)
             if pcd_xyz.shape[0] > n_points:
                 # Random sampling
                 indices = np.random.choice(pcd_xyz.shape[0], n_points, replace=False)
@@ -311,42 +396,98 @@ class RolloutEvaluationCallback(Callback):
                 pcd_rgb = np.concatenate([pcd_rgb, np.zeros((pad_size, 3), dtype=np.float32)], axis=0)
         else:
             # Fallback to dummy data if no cameras available
-            n_points = config.get('pcd_downsample_points', 6144)
+            n_points = config.get('pcd_downsample_points', 4096)
             pcd_xyz = np.random.randn(n_points, 3).astype(np.float32) * 0.1
             pcd_rgb = np.random.rand(n_points, 3).astype(np.float32)
+        
+        # Normalize proprioception if stats available
+        if config.get('normalize', False) and 'prop' in self._stats:
+            prop = self._normalize_prop(prop)
+        
+        # Normalize PCD if stats available
+        if config.get('normalize_pcd', False) and 'pcd' in self._stats:
+            pcd_xyz = self._normalize_pcd(pcd_xyz)
         
         # Create policy input
         num_obs = config.get('num_latest_obs', 2)
         policy_input = {
             'odom': {
-                'base_velocity': torch.from_numpy(prop[:3][None, None, :]).expand(1, num_obs, -1).to(device),
+                'base_velocity': torch.from_numpy(prop[:3][None, None, :]).expand(1, num_obs, -1).to(device).float(),
             },
             'qpos': {
-                'torso': torch.from_numpy(prop[3:4][None, None, :]).expand(1, num_obs, -1).to(device),
-                'left_arm': torch.from_numpy(prop[4:9][None, None, :]).expand(1, num_obs, -1).to(device),
-                'left_gripper': torch.from_numpy(prop[9:10][None, None, :]).expand(1, num_obs, -1).to(device),
-                'right_arm': torch.from_numpy(prop[10:15][None, None, :]).expand(1, num_obs, -1).to(device),
-                'right_gripper': torch.from_numpy(prop[15:16][None, None, :]).expand(1, num_obs, -1).to(device),
+                'torso': torch.from_numpy(prop[3:4][None, None, :]).expand(1, num_obs, -1).to(device).float(),
+                'left_arm': torch.from_numpy(prop[4:9][None, None, :]).expand(1, num_obs, -1).to(device).float(),
+                'left_gripper': torch.from_numpy(prop[9:10][None, None, :]).expand(1, num_obs, -1).to(device).float(),
+                'right_arm': torch.from_numpy(prop[10:15][None, None, :]).expand(1, num_obs, -1).to(device).float(),
+                'right_gripper': torch.from_numpy(prop[15:16][None, None, :]).expand(1, num_obs, -1).to(device).float(),
             },
             'pointcloud': {
-                'xyz': torch.from_numpy(pcd_xyz[None, None, :, :]).expand(1, num_obs, -1, -1).to(device),
-                'rgb': torch.from_numpy(pcd_rgb[None, None, :, :]).expand(1, num_obs, -1, -1).to(device),
+                'xyz': torch.from_numpy(pcd_xyz[None, None, :, :]).expand(1, num_obs, -1, -1).to(device).float(),
+                'rgb': torch.from_numpy(pcd_rgb[None, None, :, :]).expand(1, num_obs, -1, -1).to(device).float(),
             }
         }
         
         return policy_input
     
+    def _normalize_prop(self, prop: np.ndarray) -> np.ndarray:
+        """Normalize proprioception to [-1, 1] using stats."""
+        stats = self._stats['prop']
+        
+        # Build 16D bounds
+        prop_min = []
+        prop_max = []
+        
+        for key in ['mobile_base_vel', 'torso', 'left_arm', 'left_gripper', 'right_arm', 'right_gripper']:
+            val_min = stats[key]['min']
+            val_max = stats[key]['max']
+            if isinstance(val_min, list):
+                prop_min.extend(val_min)
+                prop_max.extend(val_max)
+            else:
+                prop_min.append(val_min)
+                prop_max.append(val_max)
+        
+        prop_min = np.array(prop_min, dtype=np.float32)
+        prop_max = np.array(prop_max, dtype=np.float32)
+        
+        # Normalize to [-1, 1]
+        range_val = prop_max - prop_min
+        range_val = np.where(range_val == 0, 1.0, range_val)
+        normalized = 2.0 * (prop - prop_min) / range_val - 1.0
+        return np.clip(normalized, -1.0, 1.0).astype(np.float32)
+    
+    def _normalize_pcd(self, pcd_xyz: np.ndarray) -> np.ndarray:
+        """Normalize PCD XYZ to [-1, 1] using stats."""
+        stats = self._stats['pcd']
+        pcd_min = np.array(stats['xyz']['min'], dtype=np.float32)
+        pcd_max = np.array(stats['xyz']['max'], dtype=np.float32)
+        
+        range_val = pcd_max - pcd_min
+        range_val = np.where(range_val == 0, 1.0, range_val)
+        normalized = 2.0 * (pcd_xyz - pcd_min) / range_val - 1.0
+        return np.clip(normalized, -1.0, 1.0).astype(np.float32)
+    
     def _denormalize_actions(self, actions: np.ndarray) -> np.ndarray:
         """
         Denormalize actions from [-1, 1] back to original range.
-        Adapted from eval_brs.py
+        
+        BRS 16D actions: [mobile_base(3), torso(1), arms(12)]
         """
         if 'action' not in self._stats:
             return actions
         
         stats = self._stats['action']
         
-        # Extract individual components
+        # Check for 'full' key (preferred format)
+        if 'full' in stats:
+            action_min = np.array(stats['full']['min'], dtype=np.float32)
+            action_max = np.array(stats['full']['max'], dtype=np.float32)
+            range_val = action_max - action_min
+            range_val = np.where(range_val == 0, 1.0, range_val)
+            denormalized = (actions + 1.0) / 2.0 * range_val + action_min
+            return denormalized.astype(np.float32)
+        
+        # Fallback to component-wise format
         mobile_base_act = actions[:3]
         torso_act = actions[3:4]
         arms_act = actions[4:16]
@@ -357,16 +498,20 @@ class RolloutEvaluationCallback(Callback):
         if 'mobile_base' in stats and 'min' in stats['mobile_base']:
             mb_min = np.array(stats['mobile_base']['min'])
             mb_max = np.array(stats['mobile_base']['max'])
-            denorm_mb = (mobile_base_act + 1.0) / 2.0 * (mb_max - mb_min + 1e-8) + mb_min
+            range_val = mb_max - mb_min
+            range_val = np.where(range_val == 0, 1.0, range_val)
+            denorm_mb = (mobile_base_act + 1.0) / 2.0 * range_val + mb_min
             denormalized_parts.append(denorm_mb)
         else:
             denormalized_parts.append(mobile_base_act)
         
         # Denormalize torso
         if 'torso' in stats and 'min' in stats['torso']:
-            t_min = stats['torso']['min']
-            t_max = stats['torso']['max']
-            denorm_t = (torso_act + 1.0) / 2.0 * (t_max - t_min + 1e-8) + t_min
+            t_min = np.array(stats['torso']['min'])
+            t_max = np.array(stats['torso']['max'])
+            range_val = t_max - t_min
+            range_val = 1.0 if range_val == 0 else range_val
+            denorm_t = (torso_act + 1.0) / 2.0 * range_val + t_min
             denormalized_parts.append(denorm_t)
         else:
             denormalized_parts.append(torso_act)
@@ -375,12 +520,14 @@ class RolloutEvaluationCallback(Callback):
         if 'arms' in stats and 'min' in stats['arms']:
             a_min = np.array(stats['arms']['min'])
             a_max = np.array(stats['arms']['max'])
-            denorm_a = (arms_act + 1.0) / 2.0 * (a_max - a_min + 1e-8) + a_min
+            range_val = a_max - a_min
+            range_val = np.where(range_val == 0, 1.0, range_val)
+            denorm_a = (arms_act + 1.0) / 2.0 * range_val + a_min
             denormalized_parts.append(denorm_a)
         else:
             denormalized_parts.append(arms_act)
         
-        return np.concatenate(denormalized_parts, axis=-1)
+        return np.concatenate(denormalized_parts, axis=-1).astype(np.float32)
     
     def _evaluate_policy(
         self, 
@@ -449,20 +596,41 @@ class RolloutEvaluationCallback(Callback):
                         else:  # [dim]
                             action_parts.append(act_tensor.cpu().numpy())
                     
-                    action = np.concatenate(action_parts, axis=-1)
+                    brs_action = np.concatenate(action_parts, axis=-1)  # 16D
                     
                     # Denormalize action
                     if config.get('normalize', False):
-                        action = self._denormalize_actions(action)
+                        brs_action = self._denormalize_actions(brs_action)
                     
-                    # Clip action to environment action space
-                    action = np.clip(action, self._env.action_space.low, self._env.action_space.high)
+                    # Convert BRS 16D action to BigYM 16D action
+                    # BRS 16D: [mobile_base(3), torso(1), left_arm(5), left_gripper(1), right_arm(5), right_gripper(1)]
+                    # BigYM 16D: [floating_base(4), left_arm(5), right_arm(5), left_gripper(1), right_gripper(1)]
+                    action = self._brs_to_bigym_action(brs_action)
                     
-                    # Execute action
-                    obs, reward, terminated, truncated, info = self._env.step(action)
-                    episode_reward += reward
+                    # CRITICAL: Apply decimation for 500Hz/50Hz frequency mismatch
+                    # Policy outputs 50Hz actions, but env runs at 500Hz
+                    # Floating base deltas are SUM of 10 x 500Hz deltas in demo
+                    # So we divide floating base by decimation and execute decimation env steps
+                    decimation = ENV_DECIMATION
+                    action_500hz = action.copy()
+                    action_500hz[0:4] = action[0:4] / decimation  # Divide floating base delta
                     
-                    # Record frame
+                    # Execute decimation env steps
+                    step_reward = 0.0
+                    for _ in range(decimation):
+                        # Clip action to environment action space
+                        action_clipped = np.clip(action_500hz, self._env.action_space.low, self._env.action_space.high)
+                        
+                        # Execute action
+                        obs, reward, terminated, truncated, info = self._env.step(action_clipped)
+                        step_reward += reward
+                        
+                        if terminated or truncated:
+                            break
+                    
+                    episode_reward += step_reward
+                    
+                    # Record frame (only once per policy step to keep video manageable)
                     self._video_recorder.record(self._env)
                     
                     if terminated or truncated:

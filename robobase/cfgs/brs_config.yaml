@@ -1,8 +1,6 @@
 # BRS Policy Configuration
 # Based on brs-algo cfg.yaml and arch/wbvima.yaml
 
-run_name: "brs_policy_test_5"
-
 # ====== Main cfg (from cfg.yaml) ======
 seed: 42
 gpus: 1
@@ -21,10 +19,10 @@ eval_interval: 10
 
 # ------ Rollout Evaluation ------
 rollout_eval: true  # Enable environment rollout evaluation
-rollout_eval_interval: 1  # Evaluate every N epochs (runs actual env episodes)
+rollout_eval_interval: 250  # Evaluate every N epochs (runs actual env episodes)
 num_eval_episodes: 1  # Number of episodes per rollout evaluation
 log_eval_video: true  # Save and log evaluation videos to wandb
-max_episode_steps: 500  # Maximum steps per episode
+max_episode_steps: 800  # Maximum steps per episode
 env_name: "SaucepanToHob"  # BigYM environment name for evaluation
 
 gradient_clip_val: 1.0
@@ -33,8 +31,7 @@ max_epochs: 10000  # Maximum number of epochs (set to desired value, or 99999999
 # ------ logging ------
 use_wandb: true
 wandb_project: "brs_policy"
-wandb_run_name: "${run_name}"  # 기본값 (deprecated, wandb_name 사용 권장)
-wandb_name: "${run_name}"  # wandb 실행 이름 (CLI로 --wandb-name으로 override 가능)
+wandb_name: "brs_policy_test"  # wandb 실행 이름 (CLI로 --wandb-name으로 override 가능)
 log_every_n_steps: 10  # wandb에 로깅하는 빈도 (step 단위)
 # wandb에 추가로 로깅할 정보들:
 # - learning rate (자동)
@@ -71,7 +68,7 @@ pointnet_n_coordinates: 3
 pointnet_n_color: 3
 pointnet_hidden_depth: 2
 pointnet_hidden_dim: 256  # Paper original setting
-pcd_downsample_points: 2048  # 2048 points (between our initial 512 and original 4096)
+pcd_downsample_points: 4096  # Paper original setting
 
 # ====== Transformer ======
 # Paper's original hyperparameters from brs-algo
@@ -111,17 +108,17 @@ loss_on_latest_obs_only: false
 # ====== PCD Dataset Settings ======
 # Use relative paths from project root or environment variables
 # Default paths can be overridden via command line arguments
-hdf5_path: "../data/demonstrations/0.9.0/SaucepanToHob_successful.hdf5"  # Filtered to successful demos only
-pcd_root: "../bigym/pcd_output_preprocessed"  # Preprocessed: 4096 points, normalized XYZ
-cameras: ["head", "left_wrist", "right_wrist"]
-max_points_per_camera: 2048  # Downsample at runtime from 4096 to 2048 (same as before)
-demo_ids: null  # null means auto-discover from pcd_root directory
-use_hdf5_pcd: false  # Use separate preprocessed PCD files for faster loading
-subsample_points: true  # Downsample from 4096 to 2048 at runtime
-normalize_pcd: false  # Already normalized in preprocessing
+hdf5_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/demos.hdf5"
+pcd_root: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/pcd"
+cameras: ["head"]
+max_points_per_camera: 4096
+demo_ids: null  # null means auto-discover from HDF5
+use_hdf5_pcd: false  # Use separate PCD files (.npy format)
+subsample_points: true
+normalize_pcd: true
 
 # ====== Normalization Settings ======
 normalize: true  # Enable normalization to [-1, 1] for actions and proprioception
-action_stats_path: "../data/demonstrations/0.9.0/action_stats.json"  # Path to action statistics
-prop_stats_path: "../data/demonstrations/0.9.0/prop_stats.json"  # Path to proprioception statistics
-pcd_stats_path: "../data/demonstrations/0.9.0/pcd_stats.json"  # Path to PCD XYZ statistics (not used for PCD if normalize_pcd=false)
+action_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/action_stats.json"
+prop_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/prop_stats.json"
+pcd_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/pcd_stats.json"

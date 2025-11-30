@@ -63,7 +63,7 @@ replay:
 wandb:  # weight and bias
   use: true
   project: act_bigym
-  entity: younggyo
+  entity: hyunjin
   name: act
 
 tb:  # TensorBoard
