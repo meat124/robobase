@@ -1,0 +1,106 @@
+# BRS Policy Configuration (RGB version - using ResNet18 instead of PointNet)
+# Based on brs-algo cfg.yaml and arch/wbvima.yaml
+
+# ====== Main cfg (from cfg.yaml) ======
+seed: 42
+gpus: 1
+lr: 0.0003  # Lower LR for ResNet (pretrained backbone)
+use_cosine_lr: true
+lr_warmup_steps: 1000
+lr_cosine_steps: 300000
+lr_cosine_min: 0.000005  # 5e-6
+lr_layer_decay: 1.0
+wd: 0.1  # from wbvima.yaml
+bs: 64  # Smaller batch size due to larger RGB data (vs PCD)
+vbs: 64  # val_batch_size
+val_split_ratio: 0.1
+dataloader_num_workers: 8  # Fewer workers (RGB is larger)
+eval_interval: 10
+
+# ------ Rollout Evaluation ------
+rollout_eval: true
+rollout_eval_interval: 250
+num_eval_episodes: 1
+log_eval_video: true
+max_episode_steps: 800
+env_name: "SaucepanToHob"
+
+gradient_clip_val: 1.0
+max_epochs: 10000
+precision: "bf16-mixed"
+
+# ------ logging ------
+use_wandb: true
+wandb_project: "brs_policy_rgb"
+wandb_name: "brs_rgb_resnet18"
+log_every_n_steps: 10
+
+# ------ common ------
+# BigYM native 16-dim actions mapped to BRS Policy 3-part autoregressive structure
+action_dim: 16
+action_keys: ["mobile_base", "torso", "arms"]
+action_key_dims:
+  mobile_base: 3
+  torso: 1
+  arms: 12
+
+# ====== Architecture specific ======
+num_latest_obs: 2
+action_prediction_horizon: 8
+
+# ------ Policy settings ------
+prop_dim: 16
+prop_keys: ["odom/base_velocity", "qpos/torso", "qpos/left_arm", "qpos/left_gripper", "qpos/right_arm", "qpos/right_gripper"]
+use_modality_type_tokens: false
+prop_mlp_hidden_depth: 2
+prop_mlp_hidden_dim: 512
+
+# ------ ResNet18 Encoder (replacing PointNet) ------
+resnet_pretrained: true  # Use ImageNet pretrained weights
+resnet_freeze_backbone: false  # Allow fine-tuning (can freeze if overfitting)
+num_camera_views: 1  # Single head camera
+
+# ------ Image settings ------
+image_size: [224, 224]  # Standard ResNet input size
+cameras: ["head"]  # Camera names
+
+# ====== Transformer ======
+xf_n_embd: 512  # ResNet18 output is 512D, matches this
+xf_n_layer: 4
+xf_n_head: 8
+xf_dropout_rate: 0.1
+xf_use_geglu: true
+
+# ====== Action Decoding ======
+learnable_action_readout_token: false
+diffusion_step_embed_dim: 256
+unet_down_dims: [128, 256]
+unet_kernel_size: 5
+unet_n_groups: 8
+unet_cond_predict_scale: true
+
+# ====== Diffusion ======
+noise_scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: "squaredcos_cap_v2"
+  clip_sample: true
+  set_alpha_to_one: true
+  steps_offset: 0
+  prediction_type: "epsilon"
+
+noise_scheduler_step_kwargs: null
+num_denoise_steps_per_inference: 16
+
+# ====== Module (DiffusionModule) ======
+loss_on_latest_obs_only: false
+
+# ====== RGB Dataset Settings ======
+hdf5_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/demos.hdf5"
+preload_data: false  # RGB images are large, careful with memory
+
+# ====== Normalization Settings ======
+normalize: true
+action_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/action_stats.json"
+prop_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/prop_stats.json"

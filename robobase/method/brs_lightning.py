@@ -25,13 +25,14 @@ brs_algo_path = Path(__file__).parent.parent.parent.parent / "brs-algo"
 sys.path.insert(0, str(brs_algo_path))
 
 # Import from brs-algo
-from brs_algo.learning.policy import WBVIMAPolicy
+from brs_algo.learning.policy import WBVIMAPolicy, WBVIMAPolicyRGB
 from brs_algo.learning.module import DiffusionModule
 from brs_algo.learning.data import ActionSeqChunkDataModule
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
 # Import PCD dataset classes
 from robobase.method.pcd_dataset import PCDBRSDataset, PCDDataModule, pcd_brs_collate_fn
+from robobase.method.rgb_dataset import RGBBRSDataset, RGBDataModule, rgb_brs_collate_fn
 from robobase.method.rollout_callback import RolloutEvaluationCallback
 
 
@@ -339,9 +340,57 @@ def create_policy_from_config(config: Dict[str, Any]) -> WBVIMAPolicy:
     return policy
 
 
-def create_module_from_config(config: Dict[str, Any]) -> SafeDiffusionModule:
-    """Create SafeDiffusionModule from config (with NaN detection)"""
-    policy = create_policy_from_config(config)
+def create_rgb_policy_from_config(config: Dict[str, Any]) -> WBVIMAPolicyRGB:
+    """Create WBVIMAPolicyRGB from config (RGB version using ResNet18)"""
+    
+    # Create noise scheduler
+    noise_scheduler_config = config['noise_scheduler']
+    noise_scheduler = DDIMScheduler(**noise_scheduler_config)
+    
+    policy = WBVIMAPolicyRGB(
+        prop_dim=config['prop_dim'],
+        prop_keys=config['prop_keys'],
+        prop_mlp_hidden_depth=config['prop_mlp_hidden_depth'],
+        prop_mlp_hidden_dim=config['prop_mlp_hidden_dim'],
+        resnet_pretrained=config.get('resnet_pretrained', True),
+        resnet_freeze_backbone=config.get('resnet_freeze_backbone', False),
+        num_camera_views=config.get('num_camera_views', 1),
+        num_latest_obs=config['num_latest_obs'],
+        use_modality_type_tokens=config['use_modality_type_tokens'],
+        xf_n_embd=config['xf_n_embd'],
+        xf_n_layer=config['xf_n_layer'],
+        xf_n_head=config['xf_n_head'],
+        xf_dropout_rate=config['xf_dropout_rate'],
+        xf_use_geglu=config['xf_use_geglu'],
+        learnable_action_readout_token=config['learnable_action_readout_token'],
+        action_dim=config['action_dim'],
+        action_prediction_horizon=config['action_prediction_horizon'],
+        diffusion_step_embed_dim=config['diffusion_step_embed_dim'],
+        unet_down_dims=config['unet_down_dims'],
+        unet_kernel_size=config['unet_kernel_size'],
+        unet_n_groups=config['unet_n_groups'],
+        unet_cond_predict_scale=config['unet_cond_predict_scale'],
+        action_keys=config['action_keys'],
+        action_key_dims=config['action_key_dims'],
+        noise_scheduler=noise_scheduler,
+        noise_scheduler_step_kwargs=config['noise_scheduler_step_kwargs'],
+        num_denoise_steps_per_inference=config['num_denoise_steps_per_inference'],
+    )
+    
+    return policy
+
+
+def create_module_from_config(config: Dict[str, Any], use_rgb: bool = False) -> SafeDiffusionModule:
+    """Create SafeDiffusionModule from config (with NaN detection)
+    
+    Args:
+        config: Configuration dictionary
+        use_rgb: If True, create RGB policy (ResNet18), else PCD policy (PointNet)
+    """
+    if use_rgb:
+        policy = create_rgb_policy_from_config(config)
+    else:
+        policy = create_policy_from_config(config)
     
     module = SafeDiffusionModule(
         policy=policy,
@@ -361,14 +410,15 @@ def create_module_from_config(config: Dict[str, Any]) -> SafeDiffusionModule:
 
 
 
-def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = True, use_pcd: bool = False):
+def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = True, use_pcd: bool = False, use_rgb: bool = False):
     """
     Create DataModule from config
     
     Args:
         config: Config dict
         use_dummy: If True, use DummyDataModule. If False, use real data
-        use_pcd: If True, use PCDDataModule with PCD files. Otherwise use ActionSeqChunkDataModule
+        use_pcd: If True, use PCDDataModule with PCD files
+        use_rgb: If True, use RGBDataModule with RGB images
     """
     if use_dummy:
         data_module = DummyDataModule(
@@ -376,13 +426,30 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             action_prediction_horizon=config['action_prediction_horizon'],
             batch_size=config['bs'],
             prop_dim=config['prop_dim'],
-            pcd_downsample_points=config['pcd_downsample_points'],
+            pcd_downsample_points=config.get('pcd_downsample_points', 4096),
             val_batch_size=config['vbs'],
             val_split_ratio=config['val_split_ratio'],
             dataloader_num_workers=config['dataloader_num_workers'],
             prefetch_factor=config.get('prefetch_factor', 4),
             persistent_workers=config.get('persistent_workers', True),
             seed=config['seed'] if config['seed'] > 0 else None,
+        )
+    elif use_rgb:
+        # Use RGB data module
+        data_module = RGBDataModule(
+            hdf5_path=config['hdf5_path'],
+            cameras=config.get('cameras', ['head']),
+            num_latest_obs=config['num_latest_obs'],
+            action_prediction_horizon=config['action_prediction_horizon'],
+            image_size=tuple(config.get('image_size', [224, 224])),
+            action_stats_path=config.get('action_stats_path', None),
+            prop_stats_path=config.get('prop_stats_path', None),
+            normalize=config.get('normalize', True),
+            batch_size=config['bs'],
+            val_batch_size=config['vbs'],
+            num_workers=config['dataloader_num_workers'],
+            val_split_ratio=config['val_split_ratio'],
+            preload_data=config.get('preload_data', False),
         )
     elif use_pcd:
         # Use PCD data module
@@ -442,15 +509,20 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
 # Main Training Function
 # ============================================================================
 
-def train(config_path: str, use_pcd: bool = False, **overrides):
+def train(config_path: str, use_pcd: bool = False, use_rgb: bool = False, **overrides):
     """
     Main training function following brs-algo structure
     
     Args:
         config_path: Path to config YAML file
-        use_pcd: If True, use PCDDataModule instead of dummy data
+        use_pcd: If True, use PCDDataModule with PointNet encoder
+        use_rgb: If True, use RGBDataModule with ResNet18 encoder
         **overrides: Override config values
     """
+    # Validation: can't use both PCD and RGB
+    if use_pcd and use_rgb:
+        raise ValueError("Cannot use both --use-pcd and --use-rgb. Choose one.")
+    
     # Load config
     config = load_config(config_path)
     
@@ -463,16 +535,28 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     if config['seed'] > 0:
         pl.seed_everything(config['seed'], workers=True)
     
+    # Determine data mode string
+    if use_rgb:
+        data_mode = "RGB Dataset (ResNet18)"
+    elif use_pcd:
+        data_mode = "PCD Dataset (PointNet)"
+    else:
+        data_mode = "Dummy Dataset"
+    
     # Print config
     print("="*80)
     print("BRS Policy Training (PyTorch Lightning)")
     print("="*80)
     print(f"Run name: {config['wandb_name']}")
     print(f"Config: {config_path}")
-    print(f"Data mode: {'PCD Dataset' if use_pcd else 'Dummy Dataset'}")
+    print(f"Data mode: {data_mode}")
     if use_pcd:
         print(f"HDF5 path: {config.get('hdf5_path', 'NOT SET')}")
         print(f"PCD root: {config.get('pcd_root', 'NOT SET')}")
+    elif use_rgb:
+        print(f"HDF5 path: {config.get('hdf5_path', 'NOT SET')}")
+        print(f"Cameras: {config.get('cameras', ['head'])}")
+        print(f"Image size: {config.get('image_size', [224, 224])}")
     print(f"Batch size: {config['bs']} (val: {config['vbs']})")
     print(f"Learning rate: {config['lr']}")
     print(f"Weight decay: {config['wd']}")
@@ -535,9 +619,12 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
     
     # Create module and data module
     print("Creating module and data module...")
-    module = create_module_from_config(config)
-    data_module = create_data_module_from_config(config, use_dummy=not use_pcd, use_pcd=use_pcd)
+    use_dummy = not (use_pcd or use_rgb)
+    module = create_module_from_config(config, use_rgb=use_rgb)
+    data_module = create_data_module_from_config(config, use_dummy=use_dummy, use_pcd=use_pcd, use_rgb=use_rgb)
     
+    encoder_type = "ResNet18" if use_rgb else ("PointNet" if use_pcd else "Dummy")
+    print(f"Encoder type: {encoder_type}")
     print(f"Policy parameters: {sum(p.numel() for p in module.policy.parameters()):,}")
     print()
     
@@ -556,8 +643,8 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
                 save_dir=run_dir,
                 log_model=False,  # 체크포인트는 로깅하지 않음
                 config=config,  # 전체 config를 wandb에 로깅
-                tags=[config.get('task', 'brs_policy'), f"seed_{config['seed']}"],  # 태그 추가
-                notes=f"Training BRS policy with {config['num_latest_obs']} obs window, {config['action_prediction_horizon']} action horizon",
+                tags=[config.get('task', 'brs_policy'), f"seed_{config['seed']}", encoder_type],  # 태그 추가
+                notes=f"Training BRS policy ({encoder_type}) with {config['num_latest_obs']} obs window, {config['action_prediction_horizon']} action horizon",
             )
             loggers.append(wandb_logger)
             
@@ -673,7 +760,8 @@ if __name__ == "__main__":
         default='../cfgs/brs_config.yaml',
         help='Path to config file'
     )
-    parser.add_argument('--use-pcd', action='store_true', help='Use PCD dataset instead of dummy data')
+    parser.add_argument('--use-pcd', action='store_true', help='Use PCD dataset with PointNet encoder')
+    parser.add_argument('--use-rgb', action='store_true', help='Use RGB dataset with ResNet18 encoder')
     parser.add_argument('--hdf5-path', type=str, default=None, help='Path to HDF5 file (overrides config)')
     parser.add_argument('--pcd-root', type=str, default=None, help='Path to PCD directory (overrides config)')
     parser.add_argument('--gpus', type=int, default=None, help='Number of GPUs')
@@ -688,6 +776,7 @@ if __name__ == "__main__":
     parser.add_argument('--dataloader-persistent-workers', action='store_true', help='Use persistent workers')
     parser.add_argument('--preload-hdf5', action='store_true', help='Preload all HDF5 data into RAM (~100MB)')
     parser.add_argument('--preload-pcd', action='store_true', help='Preload all PCD data into RAM (~3GB)')
+    parser.add_argument('--preload-data', action='store_true', help='Preload all data into RAM (for RGB mode)')
     
     args = parser.parse_args()
     
@@ -721,6 +810,8 @@ if __name__ == "__main__":
         overrides['preload_hdf5'] = True
     if args.preload_pcd:
         overrides['preload_pcd'] = True
+    if args.preload_data:
+        overrides['preload_data'] = True
     
     # Get config path
     config_path = Path(args.config)
@@ -729,4 +820,4 @@ if __name__ == "__main__":
         config_path = Path.cwd() / config_path
     
     # Train
-    train(str(config_path), use_pcd=args.use_pcd, **overrides)
+    train(str(config_path), use_pcd=args.use_pcd, use_rgb=args.use_rgb, **overrides)
