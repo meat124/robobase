@@ -27,6 +27,7 @@ env_name: "SaucepanToHob"  # BigYM environment name for evaluation
 
 gradient_clip_val: 1.0
 max_epochs: 10000  # Maximum number of epochs (set to desired value, or 999999999 for infinite)
+precision: "bf16-mixed"  # Use bfloat16 mixed precision (better numerical stability than fp16, faster than fp32)
 
 # ------ logging ------
 use_wandb: true
@@ -108,8 +109,8 @@ loss_on_latest_obs_only: false
 # ====== PCD Dataset Settings ======
 # Use relative paths from project root or environment variables
 # Default paths can be overridden via command line arguments
-hdf5_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/demos.hdf5"
-pcd_root: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/pcd"
+hdf5_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/demos.hdf5"
+pcd_root: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/pcd"
 cameras: ["head"]
 max_points_per_camera: 4096
 demo_ids: null  # null means auto-discover from HDF5
@@ -119,6 +120,6 @@ normalize_pcd: true
 
 # ====== Normalization Settings ======
 normalize: true  # Enable normalization to [-1, 1] for actions and proprioception
-action_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/action_stats.json"
-prop_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/prop_stats.json"
-pcd_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full/pcd_stats.json"
+action_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/action_stats.json"
+prop_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/prop_stats.json"
+pcd_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/pcd_stats.json"
