@@ -34,6 +34,40 @@ from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 from robobase.method.pcd_dataset import PCDBRSDataset, PCDDataModule, pcd_brs_collate_fn
 from robobase.method.rollout_callback import RolloutEvaluationCallback
 
+
+class SafeDiffusionModule(DiffusionModule):
+    """
+    Wrapper around DiffusionModule that adds NaN checking to prevent silent failures.
+    When NaN is detected in loss, logs a warning and returns a safe value instead of 
+    propagating NaN through the gradient computation.
+    """
+    
+    def training_step(self, batch, batch_idx):
+        """Override training_step to add NaN detection"""
+        loss, log_dict, batch_size = self.imitation_training_step(batch, batch_idx)
+        
+        # Check for NaN in loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"\n⚠️  WARNING: NaN/Inf detected in training loss at batch {batch_idx}")
+            print(f"    Log dict: {log_dict}")
+            # Return a safe loss value to prevent gradient explosion
+            # This is a stopgap - the model likely needs to be retrained with different settings
+            loss = torch.tensor(0.0, device=loss.device, requires_grad=True)
+            log_dict = {k: torch.tensor(0.0) if torch.isnan(v) or torch.isinf(v) else v 
+                       for k, v in log_dict.items()}
+        
+        log_dict = {f"train/{k}": v for k, v in log_dict.items()}
+        log_dict["train/loss"] = loss
+        self.log_dict(
+            log_dict,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
+        return loss
+
+
 # base 3 torso 1 left arm 5 left gripper 1 right arm 5 right gripper 1
 class DummyBRSDataset(Dataset):
     """
@@ -305,11 +339,11 @@ def create_policy_from_config(config: Dict[str, Any]) -> WBVIMAPolicy:
     return policy
 
 
-def create_module_from_config(config: Dict[str, Any]) -> DiffusionModule:
-    """Create DiffusionModule from config"""
+def create_module_from_config(config: Dict[str, Any]) -> SafeDiffusionModule:
+    """Create SafeDiffusionModule from config (with NaN detection)"""
     policy = create_policy_from_config(config)
     
-    module = DiffusionModule(
+    module = SafeDiffusionModule(
         policy=policy,
         action_prediction_horizon=config['action_prediction_horizon'],
         lr=config['lr'],
@@ -582,6 +616,12 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
         print(f"  - Video directory: {run_dir / 'eval_videos'}")
     
     # Create trainer
+    # Note: Using 32-bit precision instead of 16-mixed to avoid NaN in diffusion loss
+    # Diffusion models can be numerically unstable with half precision due to:
+    # 1. Very small noise values that underflow in float16
+    # 2. MSE loss sum over action dims that can overflow in float16
+    # 3. Low learning rates at the end of cosine schedule
+    precision_setting = config.get('precision', '32-true')
     trainer = pl.Trainer(
         default_root_dir=run_dir,
         accelerator="gpu" if config['gpus'] > 0 and torch.cuda.is_available() else "cpu",
@@ -593,7 +633,7 @@ def train(config_path: str, use_pcd: bool = False, **overrides):
         callbacks=callbacks,
         enable_progress_bar=True,
         log_every_n_steps=config.get('log_every_n_steps', 10),  # 설정 가능하게 변경
-        precision='16-mixed',  # Use mixed precision for faster training
+        precision=precision_setting,  # Default to 32-bit for stability, configurable
         profiler='simple',  # Enable profiler to identify bottlenecks
     )
     

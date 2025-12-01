@@ -3,7 +3,7 @@
 # BRS Policy Training Script for SaucepanToHob (Full Observations)
 # Uses Point Cloud (PCD) and 16D proprioception from demos.hdf5
 #
-# Dataset: saucepan_to_hob_full
+# Dataset: saucepan_to_hob
 #   - 31 demos, ~27k timesteps
 #   - PCD: pcd/demo_XXX_pcd.npy (4096, 3) per frame
 #   - Proprioception (16D):
@@ -31,7 +31,7 @@ conda activate bigym_test_1
 cd /home/hyunjin/bigym_ws/robobase
 
 # Data paths (new full observations dataset)
-DATA_DIR=/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob_full
+DATA_DIR=/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob
 HDF5_PATH=${DATA_DIR}/demos.hdf5
 PCD_ROOT=${DATA_DIR}/pcd
 
