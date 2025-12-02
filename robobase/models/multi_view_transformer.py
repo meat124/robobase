@@ -316,13 +316,20 @@ class MultiViewTransformerEncoderDecoderACT(FusionModule):
         a_hat = input_feats[0]
         mu, logvar = input_feats[2]
 
-        total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
         loss_dict = dict()
         all_l1 = F.l1_loss(actions, a_hat, reduction="none")
         l1 = (all_l1 * ~is_pad.unsqueeze(-1)).mean()
-
         loss_dict["l1"] = l1
-        loss_dict["kl"] = total_kld[0]
-        loss_dict["loss"] = loss_dict["l1"] + loss_dict["kl"] * self.kl_weight
+
+        # In eval mode (CVAE prior sampling), mu/logvar are None
+        # Only compute KL divergence in training mode
+        if mu is not None and logvar is not None:
+            total_kld, dim_wise_kld, mean_kld = kl_divergence(mu, logvar)
+            loss_dict["kl"] = total_kld[0]
+            loss_dict["loss"] = loss_dict["l1"] + loss_dict["kl"] * self.kl_weight
+        else:
+            # Eval mode: use L1 loss only (prior sampling, no KL)
+            loss_dict["kl"] = torch.tensor(0.0, device=a_hat.device)
+            loss_dict["loss"] = loss_dict["l1"]
 
         return (loss_dict["loss"], loss_dict)
