@@ -20,6 +20,7 @@ bigym_path = Path(__file__).parent.parent.parent.parent / "bigym"
 sys.path.insert(0, str(bigym_path))
 
 from bigym.envs.pick_and_place import SaucepanToHob
+from bigym.envs.manipulation import FlipCup
 from bigym.action_modes import JointPositionActionMode
 from bigym.robots.configs.h1 import H1, PelvisDof
 from bigym.utils.observation_config import ObservationConfig, CameraConfig
@@ -219,24 +220,29 @@ class RolloutEvaluationCallback(Callback):
             privileged_information=False
         )
         
+        # Include PelvisDof.Z (torso) for height control - required for manipulation tasks
+        # BRS Policy uses 16D actions: [X, Y, Z, RZ] + arms(10) + grippers(2)
+        floating_dofs = [PelvisDof.X, PelvisDof.Y, PelvisDof.Z, PelvisDof.RZ]
+        
+        # Select environment class based on env_name
         if self.env_name == "SaucepanToHob":
-            # Include PelvisDof.Z (torso) for height control - required for manipulation tasks
-            # BRS Policy uses 16D actions: [X, Y, Z, RZ] + arms(10) + grippers(2)
-            floating_dofs = [PelvisDof.X, PelvisDof.Y, PelvisDof.Z, PelvisDof.RZ]
-            
-            # Always use rgb_array render mode for video recording
-            env = SaucepanToHob(
-                action_mode=JointPositionActionMode(
-                    floating_base=True, 
-                    absolute=True,
-                    floating_dofs=floating_dofs
-                ),
-                robot_cls=H1,
-                render_mode='rgb_array',  # Required for video recording
-                observation_config=obs_config,
-            )
+            env_cls = SaucepanToHob
+        elif self.env_name == "FlipCup":
+            env_cls = FlipCup
         else:
             raise ValueError(f"Unsupported environment: {self.env_name}")
+        
+        # Always use rgb_array render mode for video recording
+        env = env_cls(
+            action_mode=JointPositionActionMode(
+                floating_base=True, 
+                absolute=True,
+                floating_dofs=floating_dofs
+            ),
+            robot_cls=H1,
+            render_mode='rgb_array',  # Required for video recording
+            observation_config=obs_config,
+        )
         
         return env
     
@@ -244,39 +250,29 @@ class RolloutEvaluationCallback(Callback):
         """
         Convert BRS 16D action to BigYM 16D action format.
         
-        BRS 16D structure:
+        BRS 16D structure (from policy output, concatenated):
             [0:3]   mobile_base (3D): dx, dy, drz
             [3:4]   torso (1D): dz
-            [4:9]   left_arm (5D): joint positions
-            [9:10]  left_gripper (1D): gripper position
-            [10:15] right_arm (5D): joint positions
-            [15:16] right_gripper (1D): gripper position
+            [4:16]  arms (12D): left_arm(5) + right_arm(5) + grippers(2)
         
         BigYM 16D structure (with floating_dofs=[X, Y, Z, RZ]):
             [0:4]   floating_base (4D): dx, dy, dz, drz
             [4:9]   left_arm (5D): joint positions
             [9:14]  right_arm (5D): joint positions
-            [14:15] left_gripper (1D): gripper position
-            [15:16] right_gripper (1D): gripper position
+            [14:16] grippers (2D): [left_gripper, right_gripper]
         """
         # Extract BRS action components
         mobile_base = brs_action[0:3]     # dx, dy, drz
         torso = brs_action[3:4]           # dz
-        left_arm = brs_action[4:9]        # 5D
-        left_gripper = brs_action[9:10]   # 1D
-        right_arm = brs_action[10:15]     # 5D
-        right_gripper = brs_action[15:16] # 1D
+        arms = brs_action[4:16]           # 12D: left_arm(5) + right_arm(5) + grippers(2)
         
         # Build BigYM 16D action
-        # Note: BigYM expects [X, Y, Z, RZ] order for floating base
+        # Note: BigYM expects [dx, dy, dz, drz] order for floating base
         bigym_action = np.concatenate([
-            mobile_base[:2],   # [0:2]  X, Y
-            torso,             # [2:3]  Z (torso)
-            mobile_base[2:3],  # [3:4]  RZ
-            left_arm,          # [4:9]  left_arm
-            right_arm,         # [9:14] right_arm
-            left_gripper,      # [14:15] left_gripper
-            right_gripper,     # [15:16] right_gripper
+            mobile_base[:2],   # [0:2]  dx, dy
+            torso,             # [2:3]  dz (torso)
+            mobile_base[2:3],  # [3:4]  drz
+            arms,              # [4:16] arms (left_arm 5 + right_arm 5 + grippers 2)
         ])
         
         return bigym_action
@@ -290,37 +286,30 @@ class RolloutEvaluationCallback(Callback):
         """
         Convert BiGym observation to BRS policy input format.
         
-        BRS Proprioception (16D):
-            - mobile_base_vel (3): [vx, vy, vrz] from floating_base_actions/dt
+        BigYM Native Proprioception (16D):
+            - mobile_base_pos (3): [x, y, rz] from floating_base
             - torso (1): z position from floating_base[2]
             - left_arm (5): from qpos[0,1,2,3,12]
             - left_gripper (1): from grippers[0]
             - right_arm (5): from qpos[13,14,15,16,25]
             - right_gripper (1): from grippers[1]
         """
-        dt = 0.02  # 50Hz control
-        
-        # Initialize proprioception components
-        mobile_base_vel = np.zeros(3, dtype=np.float32)
-        torso = np.zeros(1, dtype=np.float32)
+        # Initialize proprioception components (BigYM native: position-based)
+        mobile_base_pos = np.zeros(3, dtype=np.float32)  # x, y, rz
+        torso = np.zeros(1, dtype=np.float32)            # z
         left_arm = np.zeros(5, dtype=np.float32)
         left_gripper = np.zeros(1, dtype=np.float32)
         right_arm = np.zeros(5, dtype=np.float32)
         right_gripper = np.zeros(1, dtype=np.float32)
         
-        # Extract mobile_base_vel from floating_base_actions (delta actions)
-        if 'proprioception_floating_base_actions' in obs:
-            fb_actions = np.array(obs['proprioception_floating_base_actions']).flatten()
-            # floating_base_actions: [dx, dy, dz, drz]
-            # Convert to velocity: [vx, vy, vrz]
-            mobile_base_vel[0] = fb_actions[0] / dt  # vx
-            mobile_base_vel[1] = fb_actions[1] / dt  # vy
-            mobile_base_vel[2] = fb_actions[3] / dt  # vrz (skip dz)
-        
-        # Extract torso (z position) from floating_base
+        # Extract mobile_base_pos and torso from floating_base position
         if 'proprioception_floating_base' in obs:
             fb = np.array(obs['proprioception_floating_base']).flatten()
-            torso[0] = fb[2]  # z position
+            # floating_base: [x, y, z, rz]
+            mobile_base_pos[0] = fb[0]  # x
+            mobile_base_pos[1] = fb[1]  # y
+            mobile_base_pos[2] = fb[3]  # rz
+            torso[0] = fb[2]            # z
         
         # Extract arm joints from proprioception (qpos)
         if 'proprioception' in obs:
@@ -339,8 +328,8 @@ class RolloutEvaluationCallback(Callback):
         
         # Combine into 16D proprioception
         prop = np.concatenate([
-            mobile_base_vel,  # 3
-            torso,            # 1
+            mobile_base_pos,  # 3: x, y, rz
+            torso,            # 1: z
             left_arm,         # 5
             left_gripper,     # 1
             right_arm,        # 5
@@ -408,11 +397,11 @@ class RolloutEvaluationCallback(Callback):
         if config.get('normalize_pcd', False) and 'pcd' in self._stats:
             pcd_xyz = self._normalize_pcd(pcd_xyz)
         
-        # Create policy input
+        # Create policy input (BigYM Native format)
         num_obs = config.get('num_latest_obs', 2)
         policy_input = {
             'odom': {
-                'base_velocity': torch.from_numpy(prop[:3][None, None, :]).expand(1, num_obs, -1).to(device).float(),
+                'mobile_base_pos': torch.from_numpy(prop[:3][None, None, :]).expand(1, num_obs, -1).to(device).float(),
             },
             'qpos': {
                 'torso': torch.from_numpy(prop[3:4][None, None, :]).expand(1, num_obs, -1).to(device).float(),
@@ -433,22 +422,29 @@ class RolloutEvaluationCallback(Callback):
         """Normalize proprioception to [-1, 1] using stats."""
         stats = self._stats['prop']
         
-        # Build 16D bounds
-        prop_min = []
-        prop_max = []
-        
-        for key in ['mobile_base_vel', 'torso', 'left_arm', 'left_gripper', 'right_arm', 'right_gripper']:
-            val_min = stats[key]['min']
-            val_max = stats[key]['max']
-            if isinstance(val_min, list):
-                prop_min.extend(val_min)
-                prop_max.extend(val_max)
-            else:
-                prop_min.append(val_min)
-                prop_max.append(val_max)
-        
-        prop_min = np.array(prop_min, dtype=np.float32)
-        prop_max = np.array(prop_max, dtype=np.float32)
+        # Use 'full' key directly if available (preferred for BigYM native)
+        if 'full' in stats:
+            prop_min = np.array(stats['full']['min'], dtype=np.float32)
+            prop_max = np.array(stats['full']['max'], dtype=np.float32)
+        else:
+            # Build 16D bounds from components (legacy format)
+            prop_min = []
+            prop_max = []
+            
+            for key in ['mobile_base_pos', 'torso', 'arms']:
+                if key not in stats:
+                    continue
+                val_min = stats[key]['min']
+                val_max = stats[key]['max']
+                if isinstance(val_min, list):
+                    prop_min.extend(val_min)
+                    prop_max.extend(val_max)
+                else:
+                    prop_min.append(val_min)
+                    prop_max.append(val_max)
+            
+            prop_min = np.array(prop_min, dtype=np.float32)
+            prop_max = np.array(prop_max, dtype=np.float32)
         
         # Normalize to [-1, 1]
         range_val = prop_max - prop_min
@@ -603,8 +599,8 @@ class RolloutEvaluationCallback(Callback):
                         brs_action = self._denormalize_actions(brs_action)
                     
                     # Convert BRS 16D action to BigYM 16D action
-                    # BRS 16D: [mobile_base(3), torso(1), left_arm(5), left_gripper(1), right_arm(5), right_gripper(1)]
-                    # BigYM 16D: [floating_base(4), left_arm(5), right_arm(5), left_gripper(1), right_gripper(1)]
+                    # BRS 16D: [mobile_base(3), torso(1), arms(12)]
+                    # BigYM 16D: [floating_base(4), arms(12)]
                     action = self._brs_to_bigym_action(brs_action)
                     
                     # CRITICAL: Apply decimation for 500Hz/50Hz frequency mismatch

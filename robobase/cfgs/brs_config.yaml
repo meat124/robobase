@@ -1,53 +1,50 @@
 # BRS Policy Configuration
-# Based on brs-algo cfg.yaml and arch/wbvima.yaml
+# Uses BigYM 16D action format (native)
 
-# ====== Main cfg (from cfg.yaml) ======
+# ====== Main cfg ======
 seed: 42
 gpus: 1
-lr: 0.0007  # 7e-4
+lr: 0.0007
 use_cosine_lr: true
 lr_warmup_steps: 1000
 lr_cosine_steps: 300000
-lr_cosine_min: 0.000005  # 5e-6
+lr_cosine_min: 0.000005
 lr_layer_decay: 1.0
-wd: 0.1  # from wbvima.yaml
-bs: 256  # batch_size
-vbs: 256  # val_batch_size
+wd: 0.1
+bs: 256
+vbs: 256
 val_split_ratio: 0.1
 dataloader_num_workers: 16
 eval_interval: 10
 
 # ------ Rollout Evaluation ------
-rollout_eval: true  # Enable environment rollout evaluation
-rollout_eval_interval: 250  # Evaluate every N epochs (runs actual env episodes)
-num_eval_episodes: 1  # Number of episodes per rollout evaluation
-log_eval_video: true  # Save and log evaluation videos to wandb
-max_episode_steps: 800  # Maximum steps per episode
-env_name: "SaucepanToHob"  # BigYM environment name for evaluation
+rollout_eval: true
+rollout_eval_interval: 500
+num_eval_episodes: 1
+log_eval_video: true
+max_episode_steps: 500
+env_name: "FlipCup"
 
 gradient_clip_val: 1.0
-max_epochs: 10000  # Maximum number of epochs (set to desired value, or 999999999 for infinite)
-precision: "bf16-mixed"  # Use bfloat16 mixed precision (better numerical stability than fp16, faster than fp32)
+max_epochs: 10000
+precision: "bf16-mixed"
+use_torch_compile: true
+torch_compile_mode: "reduce-overhead"
 
 # ------ logging ------
 use_wandb: true
 wandb_project: "brs_policy"
-wandb_name: "brs_policy_test"  # wandb 실행 이름 (CLI로 --wandb-name으로 override 가능)
-log_every_n_steps: 10  # wandb에 로깅하는 빈도 (step 단위)
-# wandb에 추가로 로깅할 정보들:
-# - learning rate (자동)
-# - gradient norm (자동)
-# - train/val loss (자동)
-# - system metrics (GPU/CPU 사용률 등)
+wandb_name: "brs_policy_run"
+log_every_n_steps: 10
 
-# ------ common ------
-# BigYM native 16-dim actions mapped to BRS Policy 3-part autoregressive structure:
-# BigYM: [mobile_base(4) + left_arm(5) + right_arm(5) + grippers(2)] = 16
-# BRS structure: [mobile_base(3) + torso(1) + arms(12)] = 16
-# Direct mapping without padding:
-#   - mobile_base: BigYM[0:3] (3 dims)
-#   - torso: BigYM[3:4] (1 dim) 
-#   - arms: BigYM[4:16] (12 dims = left_arm(5) + right_arm(5) + grippers(2))
+# ------ Action Structure (BigYM Native with BRS Autoregressive) ------
+# BigYM 16D raw: [floating_base(4) + left_arm(5) + right_arm(5) + grippers(2)]
+#   floating_base: [dx, dy, dz, drz]
+#
+# BRS 3-part autoregressive structure (reordered):
+#   - mobile_base: 3D (dx, dy, drz) - DELTA position
+#   - torso: 1D (dz) - DELTA position  
+#   - arms: 12D (left_arm 5 + right_arm 5 + grippers 2) - ABSOLUTE position
 action_dim: 16
 action_keys: ["mobile_base", "torso", "arms"]
 action_key_dims:
@@ -55,36 +52,37 @@ action_key_dims:
   torso: 1
   arms: 12
 
-# ====== Architecture specific (from arch/wbvima.yaml) ======
+# ====== Architecture ======
 num_latest_obs: 2
 action_prediction_horizon: 8
 
-# ------ Policy settings ------
-prop_dim: 16  # base_velocity(3) + torso(1) + left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1)
-prop_keys: ["odom/base_velocity", "qpos/torso", "qpos/left_arm", "qpos/left_gripper", "qpos/right_arm", "qpos/right_gripper"]
+# ------ Proprioception (BigYM Native with BRS Structure) ------
+# 16D: mobile_base_pos(3) + torso_z(1) + arms(12)
+#   mobile_base_pos: [x, y, rz] from floating_base
+#   torso_z: z from floating_base
+#   arms: left_arm(5) + left_gripper(1) + right_arm(5) + right_gripper(1)
+prop_dim: 16
+prop_keys: ["odom/mobile_base_pos", "qpos/torso", "qpos/left_arm", "qpos/left_gripper", "qpos/right_arm", "qpos/right_gripper"]
 use_modality_type_tokens: false
 prop_mlp_hidden_depth: 2
-prop_mlp_hidden_dim: 256  # Paper original setting
+prop_mlp_hidden_dim: 256
 pointnet_n_coordinates: 3
 pointnet_n_color: 3
 pointnet_hidden_depth: 2
-pointnet_hidden_dim: 256  # Paper original setting
-pcd_downsample_points: 4096  # Paper original setting
+pointnet_hidden_dim: 256
+pcd_downsample_points: 4096
 
 # ====== Transformer ======
-# Paper's original hyperparameters from brs-algo
-# Model size: ~7.5M parameters (intentionally small for efficiency)
-xf_n_embd: 256      # Paper original
-xf_n_layer: 2       # Paper original (NOT a demo config - this is production)
-xf_n_head: 8        # Paper original
+xf_n_embd: 256
+xf_n_layer: 2
+xf_n_head: 8
 xf_dropout_rate: 0.1
 xf_use_geglu: true
 
 # ====== Action Decoding ======
 learnable_action_readout_token: false
-# action_dim defined above in common section (16 dims: 3+1+12)
 diffusion_step_embed_dim: 128
-unet_down_dims: [64, 128]  # Paper original
+unet_down_dims: [64, 128]
 unet_kernel_size: 5
 unet_n_groups: 8
 unet_cond_predict_scale: true
@@ -103,23 +101,21 @@ noise_scheduler:
 noise_scheduler_step_kwargs: null
 num_denoise_steps_per_inference: 16
 
-# ====== Module (DiffusionModule) ======
+# ====== Module ======
 loss_on_latest_obs_only: false
 
-# ====== PCD Dataset Settings ======
-# Use relative paths from project root or environment variables
-# Default paths can be overridden via command line arguments
-hdf5_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/demos.hdf5"
-pcd_root: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/pcd"
+# ====== Dataset Settings ======
+hdf5_path: null  # Set via CLI
+pcd_root: null   # Set via CLI
 cameras: ["head"]
 max_points_per_camera: 4096
-demo_ids: null  # null means auto-discover from HDF5
-use_hdf5_pcd: false  # Use separate PCD files (.npy format)
+demo_ids: null
+use_hdf5_pcd: false
 subsample_points: true
 normalize_pcd: true
 
-# ====== Normalization Settings ======
-normalize: true  # Enable normalization to [-1, 1] for actions and proprioception
-action_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/action_stats.json"
-prop_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/prop_stats.json"
-pcd_stats_path: "/home/hyunjin/bigym_ws/data/demonstrations/saucepan_to_hob/pcd_stats.json"
+# ====== Normalization ======
+normalize: true
+action_stats_path: null  # Auto-set from hdf5_path
+prop_stats_path: null
+pcd_stats_path: null

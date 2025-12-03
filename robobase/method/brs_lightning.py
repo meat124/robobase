@@ -30,7 +30,7 @@ from brs_algo.learning.module import DiffusionModule
 from brs_algo.learning.data import ActionSeqChunkDataModule
 from diffusers.schedulers.scheduling_ddim import DDIMScheduler
 
-# Import PCD dataset classes
+# Import dataset classes
 from robobase.method.pcd_dataset import PCDBRSDataset, PCDDataModule, pcd_brs_collate_fn
 from robobase.method.rgb_dataset import RGBBRSDataset, RGBDataModule, rgb_brs_collate_fn
 from robobase.method.rollout_callback import RolloutEvaluationCallback
@@ -392,6 +392,13 @@ def create_module_from_config(config: Dict[str, Any], use_rgb: bool = False) -> 
     else:
         policy = create_policy_from_config(config)
     
+    # Optional: Apply torch.compile for faster training (requires PyTorch 2.0+)
+    if config.get('use_torch_compile', False):
+        import torch
+        compile_mode = config.get('torch_compile_mode', 'reduce-overhead')
+        print(f"[BRS] Applying torch.compile with mode='{compile_mode}'")
+        policy = torch.compile(policy, mode=compile_mode)
+    
     module = SafeDiffusionModule(
         policy=policy,
         action_prediction_horizon=config['action_prediction_horizon'],
@@ -417,7 +424,7 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
     Args:
         config: Config dict
         use_dummy: If True, use DummyDataModule. If False, use real data
-        use_pcd: If True, use PCDDataModule with PCD files
+        use_pcd: If True, use PCDDataModule with PCD files (BigYM native format)
         use_rgb: If True, use RGBDataModule with RGB images
     """
     if use_dummy:
@@ -452,11 +459,11 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             preload_data=config.get('preload_data', False),
         )
     elif use_pcd:
-        # Use PCD data module
+        # Use PCD data module (BigYM native format)
         data_module = PCDDataModule(
             hdf5_path=config['hdf5_path'],
             pcd_root=config['pcd_root'],
-            demo_ids=config.get('demo_ids', None),  # Auto-discover if not provided
+            demo_ids=config.get('demo_ids', None),
             cameras=config.get('cameras', ['head']),
             num_latest_obs=config['num_latest_obs'],
             action_prediction_horizon=config['action_prediction_horizon'],
@@ -472,8 +479,8 @@ def create_data_module_from_config(config: Dict[str, Any], use_dummy: bool = Tru
             action_stats_path=config.get('action_stats_path', None),
             prop_stats_path=config.get('prop_stats_path', None),
             pcd_stats_path=config.get('pcd_stats_path', None),
-            normalize_pcd=config.get('normalize_pcd', True),  # Separate flag for PCD normalization
-            subsample_points=config.get('subsample_points', True),  # Control runtime downsampling
+            normalize_pcd=config.get('normalize_pcd', True),
+            subsample_points=config.get('subsample_points', True),
             preload_hdf5=config.get('preload_hdf5', False),
             preload_pcd=config.get('preload_pcd', False),
         )
@@ -515,7 +522,7 @@ def train(config_path: str, use_pcd: bool = False, use_rgb: bool = False, **over
     
     Args:
         config_path: Path to config YAML file
-        use_pcd: If True, use PCDDataModule with PointNet encoder
+        use_pcd: If True, use PCDDataModule with PointNet encoder (BigYM native format)
         use_rgb: If True, use RGBDataModule with ResNet18 encoder
         **overrides: Override config values
     """
@@ -539,7 +546,7 @@ def train(config_path: str, use_pcd: bool = False, use_rgb: bool = False, **over
     if use_rgb:
         data_mode = "RGB Dataset (ResNet18)"
     elif use_pcd:
-        data_mode = "PCD Dataset (PointNet)"
+        data_mode = "PCD Dataset (PointNet) - BigYM Native Format"
     else:
         data_mode = "Dummy Dataset"
     
@@ -760,7 +767,7 @@ if __name__ == "__main__":
         default='../cfgs/brs_config.yaml',
         help='Path to config file'
     )
-    parser.add_argument('--use-pcd', action='store_true', help='Use PCD dataset with PointNet encoder')
+    parser.add_argument('--use-pcd', action='store_true', help='Use PCD dataset with PointNet encoder (BigYM native format)')
     parser.add_argument('--use-rgb', action='store_true', help='Use RGB dataset with ResNet18 encoder')
     parser.add_argument('--hdf5-path', type=str, default=None, help='Path to HDF5 file (overrides config)')
     parser.add_argument('--pcd-root', type=str, default=None, help='Path to PCD directory (overrides config)')
@@ -777,6 +784,7 @@ if __name__ == "__main__":
     parser.add_argument('--preload-hdf5', action='store_true', help='Preload all HDF5 data into RAM (~100MB)')
     parser.add_argument('--preload-pcd', action='store_true', help='Preload all PCD data into RAM (~3GB)')
     parser.add_argument('--preload-data', action='store_true', help='Preload all data into RAM (for RGB mode)')
+    parser.add_argument('--use_torch_compile', action='store_true', help='Enable torch.compile for faster training (requires PyTorch 2.0+)')
     
     args = parser.parse_args()
     
@@ -784,6 +792,11 @@ if __name__ == "__main__":
     overrides = {}
     if args.hdf5_path is not None:
         overrides['hdf5_path'] = args.hdf5_path
+        # Auto-set stats paths based on hdf5 directory
+        data_dir = Path(args.hdf5_path).parent
+        overrides['action_stats_path'] = str(data_dir / 'action_stats.json')
+        overrides['prop_stats_path'] = str(data_dir / 'prop_stats.json')
+        overrides['pcd_stats_path'] = str(data_dir / 'pcd_stats.json')
     if args.pcd_root is not None:
         overrides['pcd_root'] = args.pcd_root
     if args.gpus is not None:
